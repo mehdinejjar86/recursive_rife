@@ -1,4 +1,4 @@
-*pyc
+*pycache*
 *.py~
 *.py#
 *demo*
@@ -6,9 +6,9 @@
 output/*
 train_log/*
 *.mp4
-
 test/
 .idea/
 *.npz
-
 *.zip
+*.pk
+*.DS_Store
