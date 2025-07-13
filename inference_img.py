@@ -2,117 +2,229 @@ import os
 import cv2
 import torch
 import argparse
+import numpy as np
+from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
-warnings.filterwarnings("ignore")
+import _thread
+import skvideo.io
+from queue import Queue, Empty
+from model.pytorch_msssim import ssim_matlab
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.set_grad_enabled(False)
-if torch.cuda.is_available():
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
+def clear_write_buffer(user_args, matched_extension, write_buffer):
+    cnt = 0
+    while True:
+        item = write_buffer.get()
+        if item is None:
+            break
+        path = os.path.join(user_args.output, f'{cnt:0>7d}{matched_extension}')
+        cv2.imwrite(path, item[:, :, ::-1])
+        cnt += 1
 
-parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
-parser.add_argument('--img', dest='img', nargs=2, required=True)
-parser.add_argument('--exp', default=4, type=int)
-parser.add_argument('--ratio', default=0, type=float, help='inference ratio between two images with 0 - 1 range')
-parser.add_argument('--rthreshold', default=0.02, type=float, help='returns image when actual ratio falls in given range threshold')
-parser.add_argument('--rmaxcycles', default=8, type=int, help='limit max number of bisectional cycles')
-parser.add_argument('--model', dest='modelDir', type=str, default='train_log', help='directory with trained model files')
-
-args = parser.parse_args()
-
-try:
+def build_read_buffer(user_args, read_buffer, videogen):
     try:
-        from model.RIFE_HDv2 import Model
-        model = Model()
-        model.load_model(args.modelDir, -1)
-        print("Loaded v2.x HD model.")
+        for frame in videogen:
+            frame = cv2.imread(os.path.join(user_args.img, frame), cv2.IMREAD_UNCHANGED)
+            # convert grayscale to BGR
+            if len(frame.shape) <  3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            frame = frame[:, :, ::-1].copy()
+            read_buffer.put(frame)
     except:
-        from train_log.RIFE_HDv3 import Model
-        model = Model()
-        model.load_model(args.modelDir, -1)
-        print("Loaded v3.x HD model.")
-except:
-    from model.RIFE_HD import Model
-    model = Model()
-    model.load_model(args.modelDir, -1)
-    print("Loaded v1.x HD model")
-if not hasattr(model, 'version'):
-    model.version = 0
-model.eval()
-model.device()
+        pass
+    read_buffer.put(None)
 
-if args.img[0].endswith('.exr') and args.img[1].endswith('.exr'):
-    img0 = cv2.imread(args.img[0], cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
-    img1 = cv2.imread(args.img[1], cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
-    img0 = (torch.tensor(img0.transpose(2, 0, 1)).to(device)).unsqueeze(0)
-    img1 = (torch.tensor(img1.transpose(2, 0, 1)).to(device)).unsqueeze(0)
-
-else:
-    img0 = cv2.imread(args.img[0], cv2.IMREAD_UNCHANGED)
-    img1 = cv2.imread(args.img[1], cv2.IMREAD_UNCHANGED)
-    img0 = cv2.resize(img0, (448, 256))
-    img1 = cv2.resize(img1, (448, 256))
-    img0 = (torch.tensor(img0.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
-    img1 = (torch.tensor(img1.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
-
-n, c, h, w = img0.shape
-ph = ((h - 1) // 64 + 1) * 64
-pw = ((w - 1) // 64 + 1) * 64
-padding = (0, pw - w, 0, ph - h)
-img0 = F.pad(img0, padding)
-img1 = F.pad(img1, padding)
-
-
-if args.ratio:
+def make_inference(I0, I1, n, model, scale=1.0):    
     if model.version >= 3.9:
-        img_list = [img0, model.inference(img0, img1, args.ratio), img1]
+        res = []
+        for i in range(n):
+            res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
+        return res
     else:
-        img0_ratio = 0.0
-        img1_ratio = 1.0
-        if args.ratio <= img0_ratio + args.rthreshold / 2:
-            middle = img0
-        elif args.ratio >= img1_ratio - args.rthreshold / 2:
-            middle = img1
+        middle = model.inference(I0, I1, scale)
+        if n == 1:
+            return [middle]
+        first_half = make_inference(I0, middle, n=n//2, model=model)
+        second_half = make_inference(middle, I1, n=n//2, model=model)
+        if n % 2:
+            return [*first_half, middle, *second_half]
         else:
-            tmp_img0 = img0
-            tmp_img1 = img1
-            for inference_cycle in range(args.rmaxcycles):
-                middle = model.inference(tmp_img0, tmp_img1)
-                middle_ratio = ( img0_ratio + img1_ratio ) / 2
-                if args.ratio - (args.rthreshold / 2) <= middle_ratio <= args.ratio + (args.rthreshold / 2):
-                    break
-                if args.ratio > middle_ratio:
-                    tmp_img0 = middle
-                    img0_ratio = middle_ratio
-                else:
-                    tmp_img1 = middle
-                    img1_ratio = middle_ratio
-        img_list.append(middle)
-        img_list.append(img1)
-else:
+            return [*first_half, *second_half]
+        
+def make_inference_recusrive(I0, I1, n, model, scale=1.0):    
     if model.version >= 3.9:
-        img_list = [img0]        
-        n = 2 ** args.exp
-        for i in range(n-1):
-            img_list.append(model.inference(img0, img1, (i+1) * 1. / n))
-        img_list.append(img1)
+        res = []
+        flows = []
+        for i in range(n):
+            res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
+        return res
     else:
-        img_list = [img0, img1]
-        for i in range(args.exp):
-            tmp = []
-            for j in range(len(img_list) - 1):
-                mid = model.inference(img_list[j], img_list[j + 1])
-                tmp.append(img_list[j])
-                tmp.append(mid)
-            tmp.append(img1)
-            img_list = tmp
+      raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
 
-if not os.path.exists('output'):
-    os.mkdir('output')
-for i in range(len(img_list)):
-    if args.img[0].endswith('.exr') and args.img[1].endswith('.exr'):
-        cv2.imwrite('output/img{}.exr'.format(i), (img_list[i][0]).cpu().numpy().transpose(1, 2, 0)[:h, :w], [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF])
-    else:
-        cv2.imwrite('output/img{}.png'.format(i), (img_list[i][0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w])
+def pad_image(img, padding):
+        return F.pad(img, padding)
+
+
+def main():
+    
+  warnings.filterwarnings("ignore")
+
+  parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
+  parser.add_argument('--model', dest='modelDir', type=str, default='train_log', help='directory with trained model files')
+  parser.add_argument('--UHD', dest='UHD', action='store_true', help='support 4k images')
+  parser.add_argument('--scale', dest='scale', type=float, default=1.0, help='Try scale=0.5 for 4k')
+  parser.add_argument('--multi', dest='multi', type=int, default=2)
+  parser.add_argument('--img', dest='img', type=str, default="Images path", help='input image directory')
+  parser.add_argument('--output', dest='output', type=str, default='vid_out', help='output path')
+
+  args = parser.parse_args()
+
+  if args.UHD and args.scale==1.0:
+      args.scale = 0.5
+  assert args.scale in [0.25, 0.5, 1.0, 2.0, 4.0]
+
+  if torch.cuda.is_available():
+      device = torch.device("cuda")
+      torch.backends.cudnn.enabled = True
+      torch.backends.cudnn.benchmark = True
+  elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+      device = torch.device("mps")
+  else:
+      device = torch.device("cpu")
+      
+  print(f"Using device: {device}")
+
+  torch.set_grad_enabled(False)
+
+  from train_log.RIFE_HDv3 import Model
+  model = Model()
+  if not hasattr(model, 'version'):
+      model.version = 0
+  model.load_model(args.modelDir, -1)
+  print("Loaded 3.x/4.x HD model.")
+  model.eval()
+  model.device()
+
+
+  videogen = []
+  image_extensions = ('.png', '.tif', '.jpg', '.jpeg', '.bmp', '.gif')
+  matched_extension = None
+
+  for f in os.listdir(args.img):
+      for ext in image_extensions:
+        if f.lower().endswith(ext):
+          matched_extension = ext
+          break
+
+      if matched_extension in f:
+          videogen.append(f)
+
+  if matched_extension:
+      print(f"This is an image file with the '{matched_extension}' extension.")
+  else:
+      print("This is not an image file.")
+      assert False, "The input directory does not contain valid image files."
+
+  tot_frame = len(videogen)
+  videogen.sort(key= lambda x:int(x[:-4]))
+  lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)
+  lastframe_dtype=lastframe.dtype
+  if lastframe_dtype == np.uint8:
+      max_val=255.
+  elif lastframe_dtype == np.uint16:
+      max_val=65535.
+  else:
+      max_val=1.
+
+  if len(lastframe.shape) < 3:
+      lastframe = cv2.cvtColor(lastframe, cv2.COLOR_GRAY2BGR)
+  lastframe = lastframe[:, :, ::-1].copy()
+  videogen = videogen[1:]
+  h, w, _ = lastframe.shape
+
+  tmp = max(128, int(128 / args.scale))
+  ph = ((h - 1) // tmp + 1) * tmp
+  pw = ((w - 1) // tmp + 1) * tmp
+  padding = (0, pw - w, 0, ph - h)
+  pbar = tqdm(total=tot_frame)
+
+  if args.output is None:
+      args.output = 'vid_out'
+  if not os.path.exists(args.output):
+      os.makedirs(args.output)
+
+  write_buffer = Queue(maxsize=500)
+  read_buffer = Queue(maxsize=500)
+  _thread.start_new_thread(build_read_buffer, (args, read_buffer, videogen))
+  _thread.start_new_thread(clear_write_buffer, (args, matched_extension, write_buffer))
+
+  I1 = torch.from_numpy(np.transpose(lastframe.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+  I1 = pad_image(I1, padding=padding)
+  temp = None # save lastframe when processing static frame
+
+  while True:
+      if temp is not None:
+          frame = temp
+          temp = None
+      else:
+          frame = read_buffer.get()
+      if frame is None:
+          break
+      I0 = I1
+      I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+      I1 = pad_image(I1, padding=padding)
+      I0_small = F.interpolate(I0, (32, 32), mode='bilinear', align_corners=False)
+      I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
+      ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
+
+      break_flag = False
+      if ssim > 0.996:
+          frame = read_buffer.get() # read a new frame
+          if frame is None:
+              break_flag = True
+              frame = lastframe
+          else:
+              temp = frame
+          I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+          I1 = pad_image(I1, padding=padding)
+          I1 = model.inference(I0, I1, scale=args.scale)
+          I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
+          ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
+          frame = (I1[0] * max_val).cpu().numpy().astype(lastframe_dtype).transpose(1, 2, 0)[:h, :w]
+          
+      if ssim < 0.2:
+          output = []
+          for i in range(args.multi - 1):
+              output.append(I0)
+          '''
+          output = []
+          step = 1 / args.multi
+          alpha = 0
+          for i in range(args.multi - 1):
+              alpha += step
+              beta = 1-alpha
+              output.append(torch.from_numpy(np.transpose((cv2.addWeighted(frame[:, :, ::-1], alpha, lastframe[:, :, ::-1], beta, 0)[:, :, ::-1].copy()), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.)
+          '''
+      else:
+          output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
+
+      write_buffer.put(lastframe)
+      for mid in output:
+          mid = (((mid[0] * max_val).cpu().numpy().astype(lastframe_dtype).transpose(1, 2, 0)))
+          write_buffer.put(mid[:h, :w])
+      pbar.update(1)
+      lastframe = frame
+      if break_flag:
+          break
+
+
+  write_buffer.put(lastframe)
+  write_buffer.put(None)  
+
+  import time
+  while(not write_buffer.empty()):
+      time.sleep(0.1)
+  pbar.close()
+
+if __name__ == '__main__':
+    main()
