@@ -96,7 +96,7 @@ def main():
 
   torch.set_grad_enabled(False)
 
-  from train_log.RIFE_HDv3 import Model
+  from rifev4_25.RIFE_HDv3 import Model
   model = Model()
   if not hasattr(model, 'version'):
       model.version = 0
