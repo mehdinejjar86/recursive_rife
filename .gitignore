@@ -3,12 +3,14 @@
 *.py#
 *demo*
 *.pkl
-output/*
+*output*
 train_log/*
 *.mp4
-test/
 .idea/
 *.npz
 *.zip
 *.pk
 *.DS_Store
+*E30*
+metrics_results*
+*test*

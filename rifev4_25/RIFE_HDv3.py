@@ -61,16 +61,16 @@ class Model:
         if rank == 0:
             torch.save(self.flownet.state_dict(),'{}/flownet.pkl'.format(path))
 
-    def inference(self, img0, img1, timestep=0.5, scale=1.0):
+    def inference(self, img0, img1, timestep=0.5, scale=1.0, prev_flows=[], prev_masks=[]):
         imgs = torch.cat((img0, img1), 1)
         scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
-        flow, mask, merged = self.flownet(imgs, timestep, scale_list)
+        flow, mask, merged = self.flownet(imgs, timestep, scale_list, prev_flows=prev_flows, prev_masks=prev_masks)
         return merged[-1]
     
-    def inference_flow(self, img0, img1, timestep=0.5, scale=1.0):
+    def flow_extractor(self, img0, img1, timestep=0.5, scale=1.0):
         imgs = torch.cat((img0, img1), 1)
         scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
         flow, mask, merged = self.flownet(imgs, timestep, scale_list)
-        return merged[-1], flow
+        return flow, mask
     
 

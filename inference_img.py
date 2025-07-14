@@ -10,6 +10,7 @@ import _thread
 import skvideo.io
 from queue import Queue, Empty
 from model.pytorch_msssim import ssim_matlab
+import math
 
 def clear_write_buffer(user_args, matched_extension, write_buffer):
     cnt = 0
@@ -50,17 +51,126 @@ def make_inference(I0, I1, n, model, scale=1.0):
             return [*first_half, middle, *second_half]
         else:
             return [*first_half, *second_half]
-        
+
 def make_inference_recusrive(I0, I1, n, model, scale=1.0):    
     if model.version >= 3.9:
         res = []
         flows = []
+        masks = []
+
+        original_n = n
+
         for i in range(n):
-            res_single, flow = model.inference_flow(I0, I1, (i+1) * 1. / (n+1), scale)
-            res.append(res_single)
-        return res
-    else:
-      raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
+
+            if i == 0 or i == n - 1:
+                res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
+            else:
+                flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
+                flows.append([flow])
+                masks.append([mask])
+        
+        n -= 2
+        I0 = res[0]
+        I1 = res[-1]
+
+        while len(res) != original_n:
+            for i in range(n):
+            
+                if i == 0 or i == n - 1:
+                    prev_flows = flows[0] if i == 0 else flows[i-1]
+                    prev_masks = masks[0] if i == 0 else masks[i-1]
+                    res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale, prev_flows=prev_flows, prev_masks=prev_masks)
+                    middle_index = math.ceil(len(res) / 2) if len(res) != 0 else 0
+                    res.insert(middle_index, res_out)
+                else:
+                    flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
+                    flows[i].append(flow)
+                    masks[i].append(mask)
+                
+            I0 = res[middle_index-1]
+            I1 = res[middle_index]
+
+            n -= 2
+
+            if len(res) == original_n:
+                break
+
+            if flows != []:
+                flows.pop(0)
+                masks.pop(0)
+                flows.pop(-1)
+                masks.pop(-1)
+
+    return res
+
+
+
+        
+# def make_inference_recusrive(I0, I1, n, model, scale=1.0):    
+#     if model.version >= 3.9:
+#         res = []
+#         flows = []
+#         masks = []
+#         while True:
+#             f = 0
+#             for i in range(n):
+#                 if i == 0 or i == n - 1:
+
+#                     if flows != []:
+#                         if i == 0:
+#                             prev_flows = flows[0]
+#                             prev_masks = masks[0]
+#                         else:
+#                             prev_flows = flows[-1]
+#                             prev_masks = masks[-1]
+
+#                         print(len(prev_flows), len(prev_masks))
+#                         res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale, prev_flows=prev_flows, prev_masks=prev_masks) 
+
+#                         if i == 0:
+#                             flows.pop(0)
+#                         elif i == n - 1:
+#                             try:
+#                                 flows.pop(-1)
+#                             except:
+#                                 pass
+#                     else:
+#                         res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale)
+
+                        
+
+#                     if len(res) == 0:
+#                         res.append(res_out) 
+#                     else:
+#                         middle_index = math.ceil(len(res) / 2)
+#                         res.insert(middle_index, res_out) 
+
+            
+                    
+                        
+#                 else:
+#                     flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
+
+#                     try:
+#                         flows[f].append(flow)
+#                         masks[f].append(mask)
+#                     except:
+#                         flows.append([flow])
+#                         masks.append([mask])
+#                     finally:
+#                         f += 1
+
+            
+            
+#             if flows == []:
+#                 break
+#             n -= 2
+#             I0 = res[middle_index-1]
+#             I1 = res[middle_index]
+
+#         return res
+#     else:
+#       raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
 
 def pad_image(img, padding):
         return F.pad(img, padding)
@@ -77,6 +187,7 @@ def main():
   parser.add_argument('--multi', dest='multi', type=int, default=2)
   parser.add_argument('--img', dest='img', type=str, default="Images path", help='input image directory')
   parser.add_argument('--output', dest='output', type=str, default='vid_out', help='output path')
+  parser.add_argument('--recursive', dest='recursive', action='store_true', help='use recursive inference')
 
   args = parser.parse_args()
 
@@ -207,7 +318,10 @@ def main():
               output.append(torch.from_numpy(np.transpose((cv2.addWeighted(frame[:, :, ::-1], alpha, lastframe[:, :, ::-1], beta, 0)[:, :, ::-1].copy()), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.)
           '''
       else:
-          output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
+          if args.recursive:
+                output = make_inference_recusrive(I0, I1, args.multi - 1, model, scale=args.scale)
+          else:
+                output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
 
       write_buffer.put(lastframe)
       for mid in output:

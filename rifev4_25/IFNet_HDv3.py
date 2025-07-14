@@ -116,7 +116,7 @@ class IFNet(nn.Module):
         )
         '''
 
-    def forward(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False, fastmode=True, ensemble=False, prev_flows=None):
+    def forward(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False, fastmode=True, ensemble=False, prev_flows=[], prev_masks=[]):
         if training == False:
             channel = x.shape[1] // 2
             img0 = x[:, :channel]
@@ -136,15 +136,48 @@ class IFNet(nn.Module):
         mask = None
         loss_cons = 0
         block = [self.block0, self.block1, self.block2, self.block3, self.block4]
+
+        if prev_flows is not []:
+            num_flows = len(prev_flows)
+
+            # Define exponential decay factor (you can adjust this value)
+            decay_factor = 2.5  # You can experiment with different values
+
+            # Calculate exponential weights
+            indices = torch.arange(0, num_flows + 1, device=device, dtype=torch.float32)
+            flows_weights = torch.exp(-decay_factor * indices)
+
+            # Reverse the weights so the most recent flows have the highest weight
+            flows_weights = flows_weights.flip(0)
+
+            # Normalize the weights so they sum to 1
+            flows_weights = flows_weights / flows_weights.sum()
+
+
+            # assert len(prev_flows) == len(prev_masks), "prev_flows and prev_masks must have the same length"
+
         for i in range(5):
             if flow is None:
                 flow, mask, feat = block[i](torch.cat((img0[:, :3], img1[:, :3], f0, f1, timestep), 1), None, scale=scale_list[i])
+                if prev_flows is not []:
+                    flow = flow * flows_weights[-1]
+                    for j in range(num_flows):
+                        prev_flow_resized = F.interpolate(prev_flows[j][i], size=flow.shape[2:], mode='bilinear', align_corners=False)
+                        flow += prev_flow_resized * flows_weights[j]
                 if ensemble:
                     print("warning: ensemble is not supported since RIFEv4.21")
             else:
                 wf0 = warp(f0, flow[:, :2])
                 wf1 = warp(f1, flow[:, 2:4])
                 fd, m0, feat = block[i](torch.cat((warped_img0[:, :3], warped_img1[:, :3], wf0, wf1, timestep, mask, feat), 1), flow, scale=scale_list[i])
+                if prev_flows is not []:
+                    fd = fd * flows_weights[-1]
+                    for j in range(num_flows):
+                        prev_flow_resized = F.interpolate(prev_flows[j][i], size=flow.shape[2:], mode='bilinear', align_corners=False)
+
+                        fd += prev_flow_resized * flows_weights[j]
+
+                
                 if ensemble:
                     print("warning: ensemble is not supported since RIFEv4.21")
                 else:
@@ -155,7 +188,19 @@ class IFNet(nn.Module):
             warped_img0 = warp(img0, flow[:, :2])
             warped_img1 = warp(img1, flow[:, 2:4])
             merged.append((warped_img0, warped_img1))
+
+        # if prev_masks != []:
+        #     mask = mask * flows_weights[-1]
+        #     for j in range(num_flows):
+        #         # Resize previous masks to match the final mask's size
+        #         prev_mask_resized = F.interpolate(prev_masks[j], size=mask.shape[2:], mode='bilinear', align_corners=False)
+        #         mask += prev_mask_resized * flows_weights[j]
+
         mask = torch.sigmoid(mask)
+        
+    
+
+
         merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
         if not fastmode:
             print('contextnet is removed')
