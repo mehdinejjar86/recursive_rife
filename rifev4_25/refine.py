@@ -8,7 +8,14 @@ from model.warplayer import warp
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 
-device = torch.device("cuda")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = True
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
 def conv(in_planes, out_planes, kernel_size=3, stride=1, padding=1, dilation=1):
     return nn.Sequential(
