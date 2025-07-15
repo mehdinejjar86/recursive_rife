@@ -10,8 +10,6 @@ import torch.nn.functional as F
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = torch.device("mps")
 else:
