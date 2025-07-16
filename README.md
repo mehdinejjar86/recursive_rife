@@ -87,12 +87,6 @@ This project offers two distinct interpolation modes: the standard direct approa
 - **When to use:** This mode might be considered for:
   - **Exploring alternative strategies:** If you are conducting research or experiments into different methods of flow-based interpolation refinement.
   - **Specific model behaviors:** In rare cases, some RIFE versions or custom-trained models might exhibit unique characteristics where iterative refinement yields marginally better results for specific content, although this is less common with general-purpose modern RIFE models.
-- **Important Considerations:**
-  - **Complexity:** The internal logic of `make_inference_recursive` is intricate.
-  - **Performance/Quality:** For general usage with modern RIFE models (v3.9+), the **Standard Interpolation** mode is usually more efficient and delivers comparable or superior visual quality because the core `model.inference` is already highly optimized for direct `timestep` interpolation. The recursive mode might not offer significant advantages and could potentially introduce unique artifacts or increase processing time.
-  - **`--multi` Compatibility:** While the code aims for flexibility, recursive bisection-like algorithms inherently work most efficiently and predictably when the number of _inserted_ frames (`--multi - 2`) plus one (i.e., `--multi - 1`) is a power of 2.
-
-**For optimal results and ease of use, we strongly recommend starting with the Standard Interpolation mode (without the `--recursive` flag), as it aligns directly with the capabilities of most modern RIFE models.**
 
 ---
 
