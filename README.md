@@ -4,18 +4,7 @@
   <img src="image/grid.png" alt="Sample Interpolation Grid" width="600"/>
 </p>
 
-This repository provides a practical and efficient solution for video frame interpolation utilizing the RIFE (Real-time Intermediate Flow Estimation) model. It enables users to generate smooth, high-quality intermediate frames between existing video frames, effectively increasing video frame rates, creating slow-motion effects, or enhancing the temporal consistency of generated video sequences (e.g., from diffusion models).
-
-## ✨ Key Features
-
-- **RIFE Model Integration:** Built upon the high-performance RIFE model for state-of-the-art frame interpolation.
-- **Flexible Frame Insertion:** Capable of generating an arbitrary number of intermediate frames between any two consecutive input frames.
-- **Dynamic Resolution Handling:** Supports various input image resolutions, with optional downscaling (`--scale`) for optimizing performance on UHD (4K) content.
-- **Multi-GPU Acceleration:** Leverages PyTorch for accelerated inference, enabling faster processing on compatible GPU hardware.
-- **Efficient I/O Pipeline:** Implements a multi-threaded architecture with queues for asynchronous image reading and writing, mitigating I/O bottlenecks and reducing the risk of Out-of-Memory (OOM) errors during large-scale processing.
-- **Intelligent Static Frame Skipping:** Automatically detects and skips interpolation for highly similar (static) consecutive frames based on SSIM, optimizing processing time.
-- **Progress Tracking:** Integrates `tqdm` progress bars to provide real-time feedback on image reading, interpolation, and writing stages.
-- **Dual Interpolation Modes:** Offers both a standard direct interpolation method and an advanced recursive approach for specific use cases (see "Interpolation Modes" below).
+This repository provides a practical and efficient solution for video frame interpolation utilizing the RIFE (Real-time Intermediate Flow Estimation) model. It enables users to generate recursivly smooth, high-quality intermediate frames between existing video frames, effectively increasing video frame rates, creating slow-motion effects, or enhancing the temporal consistency of generated video sequences (e.g., from diffusion models).
 
 ## 🚀 Getting Started
 
