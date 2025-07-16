@@ -1,75 +1,127 @@
-# Practical-RIFE Recursive
+# Practical-RIFE-Interpolation
 
-Coming Soon
+<p align="center">
+  <img src="image/grid.png" alt="Sample Interpolation Grid" width="600"/>
+</p>
 
-## Frame Interpolation
+This repository provides a practical and efficient solution for video frame interpolation utilizing the RIFE (Real-time Intermediate Flow Estimation) model. It enables users to generate smooth, high-quality intermediate frames between existing video frames, effectively increasing video frame rates, creating slow-motion effects, or enhancing the temporal consistency of generated video sequences (e.g., from diffusion models).
 
-2024.08 - We find that 4.24+ is quite suitable for post-processing of [some diffusion model generated videos](https://drive.google.com/drive/folders/1hSzUn10Era3JCaVz0Z5Eg4wT9R6eJ9U9?usp=sharing).
+## ✨ Key Features
 
-### Trained Model
+- **RIFE Model Integration:** Built upon the high-performance RIFE model for state-of-the-art frame interpolation.
+- **Flexible Frame Insertion:** Capable of generating an arbitrary number of intermediate frames between any two consecutive input frames.
+- **Dynamic Resolution Handling:** Supports various input image resolutions, with optional downscaling (`--scale`) for optimizing performance on UHD (4K) content.
+- **Multi-GPU Acceleration:** Leverages PyTorch for accelerated inference, enabling faster processing on compatible GPU hardware.
+- **Efficient I/O Pipeline:** Implements a multi-threaded architecture with queues for asynchronous image reading and writing, mitigating I/O bottlenecks and reducing the risk of Out-of-Memory (OOM) errors during large-scale processing.
+- **Intelligent Static Frame Skipping:** Automatically detects and skips interpolation for highly similar (static) consecutive frames based on SSIM, optimizing processing time.
+- **Progress Tracking:** Integrates `tqdm` progress bars to provide real-time feedback on image reading, interpolation, and writing stages.
+- **Dual Interpolation Modes:** Offers both a standard direct interpolation method and an advanced recursive approach for specific use cases (see "Interpolation Modes" below).
 
-The content of these links is under the same MIT license as this project. **lite** means using similar training framework, but lower computational cost model.
-Currently, it is recommended to choose 4.25 by default for most scenes.
+## 🚀 Getting Started
 
-4.26 - 2024.09.21 | [Google Drive](https://drive.google.com/file/d/1gViYvvQrtETBgU1w8axZSsr7YUuw31uy/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1EZsG3IFO8C1e2uRVb_Npgg?pwd=smw8) || [4.25.lite - 2024.10.20](https://drive.google.com/file/d/1zlKblGuKNatulJNFf5jdB-emp9AqGK05/view?usp=share_link)
+Follow these steps to set up and run the RIFE interpolation script on your local machine.
 
-4.25 - 2024.09.19 | [Google Drive](https://drive.google.com/file/d/1ZKjcbmt1hypiFprJPIKW0Tt0lr_2i7bg/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1rpUX5uawusz2uwEdXtjRbw?pwd=mo6k) | I am trying using more flow blocks, so the scale_list will change accordingly. It seems that the anime scenes have been significantly improved.
+### Prerequisites
 
-4.22 - 2024.08.08 | [Google Drive](https://drive.google.com/file/d/1qh2DSA9a1eZUTtZG9U9RQKO7N7OaUJ0_/view?usp=share_link) [百度网盘](https://pan.baidu.com/s/1EA5BIHqOu35Rj4meg00G4g?pwd=hwym) || [4.22.lite](https://drive.google.com/file/d/1Smy6gY7BkS_RzCjPCbMEy-TsX8Ma5B0R/view?usp=sharing) || 4.21 - 2024.08.04 | [Google Drive](https://drive.google.com/file/d/1l5u6G8vEkPAT7cYYWwzB6OG8vwBYrxiS/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1TMjRFOwdLgsShKdGbTKW_g?pwd=4q6d)
+Ensure you have the following installed:
 
-4.20 - 2024.07.24 | [Google Drive](https://drive.google.com/file/d/11n3YR7-qCRZm9RDdwtqOTsgCJUHPuexA/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1v0b7ZTSj_VvLOfW-hQ_NZQ?pwd=ykkv)
-|| 4.18 - 2024.07.03 | [Google Drive](https://drive.google.com/file/d/1octn-UVuEjXa_HlsIUbNeLTTvYCKbC_s/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1fqtxJyXSgUx-gE3rieuKxg?pwd=udr1)
-
-4.17 - 2024.05.24 | [Google Drive](https://drive.google.com/file/d/1962p_lEWo_kLTEynarNaRYRNVdaiQG2k/view?usp=share_link) [百度网盘](https://pan.baidu.com/s/1bMzTYoJKZXsoxuSBmzj6VQ?pwd=as37) : Add gram loss from [FILM](https://github.com/google-research/frame-interpolation/blob/69f8708f08e62c2edf46a27616a4bfcf083e2076/losses/vgg19_loss.py) || [4.17.lite](https://drive.google.com/file/d/1e9Qb4rm20UAsO7h9VILDwrpvTSHWWW8b/view?usp=share_link)
-
-4.15 - 2024.03.11 | [Google Drive](https://drive.google.com/file/d/1xlem7cfKoMaiLzjoeum8KIQTYO-9iqG5/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1IGNIX7JXGUwI_tfoafYHqA?pwd=bg0b) || [4.15.lite](https://drive.google.com/file/d/1BoOF-qSEnTPDjpKG1sBTa6k7Sv5_-k7z/view?usp=sharing) || 4.14 - 2024.01.08 | [Google Drive](https://drive.google.com/file/d/1BjuEY7CHZv1wzmwXSQP9ZTj0mLWu_4xy/view?usp=share_link) [百度网盘](https://pan.baidu.com/s/1d-W64lRsJTqNsgWoXYiaWQ?pwd=xawa) || [4.14.lite](https://drive.google.com/file/d/1eULia_onOtRXHMAW9VeDL8N2_7z8J1ba/view?usp=share_link)
-
-v4.9.2 - 2023.11.01 | [Google Drive](https://drive.google.com/file/d/1UssCvbL8N-ty0xIKM5G5ZTEgp9o4w3hp/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/18cbx3EP4HWgSa1vkcXvvyw?pwd=swr9) || v4.3 - 2022.8.17 | [Google Drive](https://drive.google.com/file/d/1xrNofTGMHdt9sQv7-EOG0EChl8hZW_cU/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/12AUAeZLZf5E1_Zx6WkS3xw?pwd=q83a)
-
-v3.8 - 2021.6.17 | [Google Drive](https://drive.google.com/file/d/1O5KfS3KzZCY3imeCr2LCsntLhutKuAqj/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1X-jpWBZWe-IQBoNAsxo2mA?pwd=kxr3) || v3.1 - 2021.5.17 | [Google Drive](https://drive.google.com/file/d/1xn4R3TQyFhtMXN2pa3lRB8cd4E1zckQe/view?usp=sharing) [百度网盘](https://pan.baidu.com/s/1W4p_Ni04HLI_jTy45sVodA?pwd=64bz)
-
-[More Older Version](https://github.com/megvii-research/ECCV2022-RIFE/issues/41)
+- Python (3.8 - 3.11 recommended)
+- PyTorch + Also Support Metal Performance Shaders
 
 ### Installation
 
-python <= 3.11
+Clone the repository to your local machine:
 
-```
-git clone git@github.com:hzwer/Practical-RIFE.git
-cd Practical-RIFE
-pip3 install -r requirements.txt
-```
-
-Download a model from the model list and put \*.py and flownet.pkl on train_log/
-
-### Run
-
-Coming Soon
-
-## Citation
-
-```
-@inproceedings{huang2022rife,
-  title={Real-Time Intermediate Flow Estimation for Video Frame Interpolation},
-  author={Huang, Zhewei and Zhang, Tianyuan and Heng, Wen and Shi, Boxin and Zhou, Shuchang},
-  booktitle={Proceedings of the European Conference on Computer Vision (ECCV)},
-  year={2022}
-}
+```bash
+git clone [https://github.com/mehdinejjar86/recursive_rife.git](https://github.com/mehdinejjar86/recursive_rife.git)
+cd recursive_rife
+pip install -r requirements.txt
 ```
 
+### Download Trained Model
+
+You will need a pre-trained RIFE model checkpoint.
+
+1.  **Download:** Download the `model.pkl` file from the links provided below in the "Supported Models" section.
+2.  **Placement:** Place the downloaded `model.pkl` (only) into this subdirectory.
+    - Example structure:
+      ```
+      recursive_rife/
+      ├── ckpt/
+      │   └── rifev4_25/
+      │       └── model.pkl
+      │       └── (any_other_model_files.py)
+      ├── inference_img.py
+      ├── (other project files)
+      └── README.md
+      ```
+
+## 🛠 Usage
+
+The `inference_img.py` script is the main entry point for performing interpolation. It processes a sequence of images from an input directory, interpolating between each consecutive pair, and saving the results to an output directory.
+
+### Command-line Arguments
+
+- `--model`: **Required.** Path to the directory containing the trained RIFE model files (e.g., `ckpt/rifev4_25`).
+- `--img`: **Required.** Path to the input directory containing your source images. Images should be named numerically and sequentially (e.g., `0000000.png`, `0000001.png`, `0000002.png`).
+- `--output`: **Optional.** Path to the directory where interpolated frames will be saved. If not specified, defaults to `vid_out/`.
+- `--multi`: **Crucial Parameter.** An integer defining the **total number of frames to output for each original input frame pair**, _including_ the two original frames themselves.
+  - `--multi 2`: Outputs only the original frames (no interpolation).
+  - `--multi 3`: Inserts `1` frame between each original pair.
+  - `--multi 5`: Inserts `3` frames between each original pair.
+  - `--multi N`: Inserts `N-2` frames between each original pair.
+- `--UHD`: **Flag.** Use this flag to enable support for 4K images. When set, `--scale` automatically defaults to `0.5` unless explicitly overridden.
+- `--scale`: **Optional.** A float specifying the internal scaling factor for model processing. Must be one of `0.25`, `0.5`, `1.0`, `2.0`, or `4.0`. (Default: `1.0`). Use `0.5` or `0.25` for very high-resolution inputs to manage memory.
+- `--recursive`: **Flag.** Use this flag to enable the experimental recursive interpolation mode. See "Interpolation Modes" below for detailed explanation. (Default: `False`).
+
+### Example Run
+
+To interpolate `15` frames between each pair of images in `./data/input_frames/` using the `rifev4_25` model, saving to `./data/output_frames/`:
+
+```bash
+python inference_img.py --model ckpt/rifev4_25 --multi 17 --img ./data/input_frames --output ./data/output_frames
 ```
-@inproceedings{huang2024safa,
-  title={Scale-Adaptive Feature Aggregation for Efficient Space-Time Video Super-Resolution},
-  author={Huang, Zhewei and Huang, Ailin and Hu, Xiaotao and Hu, Chen and Xu, Jun and Zhou, Shuchang},
-  booktitle={Winter Conference on Applications of Computer Vision (WACV)},
-  year={2024}
-}
-```
 
-## Reference
+---
 
-Optical Flow:
-[ARFlow](https://github.com/lliuz/ARFlow) [pytorch-liteflownet](https://github.com/sniklaus/pytorch-liteflownet) [RAFT](https://github.com/princeton-vl/RAFT) [pytorch-PWCNet](https://github.com/sniklaus/pytorch-pwc)
+## Interpolation Modes
 
-Video Interpolation:
-[DVF](https://github.com/lxx1991/pytorch-voxel-flow) [TOflow](https://github.com/Coldog2333/pytoflow) [SepConv](https://github.com/sniklaus/sepconv-slomo) [DAIN](https://github.com/baowenbo/DAIN) [CAIN](https://github.com/myungsub/CAIN) [MEMC-Net](https://github.com/baowenbo/MEMC-Net) [SoftSplat](https://github.com/sniklaus/softmax-splatting) [BMBC](https://github.com/JunHeum/BMBC) [EDSC](https://github.com/Xianhang/EDSC-pytorch) [EQVI](https://github.com/lyh-18/EQVI) [RIFE](https://github.com/hzwer/arXiv2020-RIFE)
+This project offers two distinct interpolation modes: the standard direct approach and an advanced recursive method. It's important to understand their differences to choose the most suitable one for your needs and model version.
+
+### 1\. Standard Interpolation (Recommended)
+
+- **How to use:** Do **NOT** include the `--recursive` flag in your command. This is the default behavior.
+- **Underlying Function:** `make_inference` (when `model.version >= 3.9`)
+- **Mechanism:** This mode directly utilizes the `timestep` parameter of the RIFE model's `inference` function. For a given `--multi N`, it calculates `N-2` intermediate frames by evenly distributing the `timestep` values across the `0` to `1` interval (e.g., `1/(N-1)`, `2/(N-1)`, ..., `(N-2)/(N-1)`).
+- **When to use:** This is the **recommended mode** for most modern RIFE models (especially versions 3.9 and higher, like `rifev4_25`). These models are typically trained to perform robustly across a continuous range of `timestep` values, providing the most flexible and consistent results for any `N` specified by `--multi`.
+
+### 2\. Recursive Interpolation (Advanced / Experimental)
+
+- **How to use:** Include the `--recursive` flag in your command (e.g., `python inference_img.py --recursive ...`).
+- **Underlying Function:** `make_inference_recursive` (for `model.version >= 3.9`)
+- **Mechanism:** This mode implements a more complex, multi-stage iterative refinement strategy. Instead of a single direct inference per intermediate frame, it performs several passes, incrementally refining flow and mask predictions for a sequence of frames. It's designed to build up the interpolated sequence through a series of specialized inferences.
+- **When to use:** This mode might be considered for:
+  - **Exploring alternative strategies:** If you are conducting research or experiments into different methods of flow-based interpolation refinement.
+  - **Specific model behaviors:** In rare cases, some RIFE versions or custom-trained models might exhibit unique characteristics where iterative refinement yields marginally better results for specific content, although this is less common with general-purpose modern RIFE models.
+- **Important Considerations:**
+  - **Complexity:** The internal logic of `make_inference_recursive` is intricate.
+  - **Performance/Quality:** For general usage with modern RIFE models (v3.9+), the **Standard Interpolation** mode is usually more efficient and delivers comparable or superior visual quality because the core `model.inference` is already highly optimized for direct `timestep` interpolation. The recursive mode might not offer significant advantages and could potentially introduce unique artifacts or increase processing time.
+  - **`--multi` Compatibility:** While the code aims for flexibility, recursive bisection-like algorithms inherently work most efficiently and predictably when the number of _inserted_ frames (`--multi - 2`) plus one (i.e., `--multi - 1`) is a power of 2.
+
+**For optimal results and ease of use, we strongly recommend starting with the Standard Interpolation mode (without the `--recursive` flag), as it aligns directly with the capabilities of most modern RIFE models.**
+
+---
+
+## 📈 Performance & Quality
+
+- **Model Version:** The RIFE `4.25` model has shown good suitability for post-processing videos, including those generated by diffusion models, providing smooth and visually appealing transitions.
+- **`--scale`:** For high-resolution inputs (e.g., 4K), using `--scale 0.5` or `--scale 0.25` is advised to manage VRAM usage and potentially improve speed, with a slight trade-off in fine detail.
+- **Threads & Queues:** The multi-threaded I/O pipeline (`_thread.start_new_thread(build_read_buffer, ...)` and `_thread.start_new_thread(clear_write_buffer, ...)`) is crucial for maintaining a high processing throughput and preventing common out-of-memory issues, especially when dealing with large numbers of frames.
+
+## 🤝 Contribution
+
+Contributions are welcome\! If you have suggestions for improvements, new features, or bug fixes, please feel free to open an issue or submit a pull request.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE.md) file for details.
