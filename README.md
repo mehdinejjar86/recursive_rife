@@ -51,10 +51,9 @@ The `inference_img.py` script is the main entry point for performing interpolati
 - `--img`: **Required.** Path to the input directory containing your source images. Images should be named numerically and sequentially (e.g., `0000000.png`, `0000001.png`, `0000002.png`).
 - `--output`: **Optional.** Path to the directory where interpolated frames will be saved. If not specified, defaults to `vid_out/`.
 - `--multi`: **Crucial Parameter.** An integer defining the **total number of frames to output for each original input frame pair**, _including_ the two original frames themselves.
-  - `--multi 2`: Outputs only the original frames (no interpolation).
-  - `--multi 3`: Inserts `1` frame between each original pair.
-  - `--multi 5`: Inserts `3` frames between each original pair.
-  - `--multi N`: Inserts `N-2` frames between each original pair.
+  - `--multi 3`: Inserts `2` frame between each original pair.
+  - `--multi 5`: Inserts `4` frames between each original pair.
+  - `--multi N`: Inserts `N-1` frames between each original pair.
 - `--UHD`: **Flag.** Use this flag to enable support for 4K images. When set, `--scale` automatically defaults to `0.5` unless explicitly overridden.
 - `--scale`: **Optional.** A float specifying the internal scaling factor for model processing. Must be one of `0.25`, `0.5`, `1.0`, `2.0`, or `4.0`. (Default: `1.0`). Use `0.5` or `0.25` for very high-resolution inputs to manage memory.
 - `--recursive`: **Flag.** Use this flag to enable the experimental recursive interpolation mode. See "Interpolation Modes" below for detailed explanation. (Default: `False`).
