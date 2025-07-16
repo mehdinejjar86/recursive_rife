@@ -1,10 +1,6 @@
 # Practical-RIFE-Interpolation
 
-<p align="center">
-  <img src="image/grid.png" alt="Sample Interpolation Grid" width="600"/>
-</p>
-
-This repository provides a practical and efficient solution for video frame interpolation utilizing the RIFE (Real-time Intermediate Flow Estimation) model. It enables users to generate recursivly smooth, high-quality intermediate frames between existing video frames, effectively increasing video frame rates, creating slow-motion effects, or enhancing the temporal consistency of generated video sequences (e.g., from diffusion models).
+This repository provides a practical and efficient solution for video frame interpolation utilizing the RIFE (Real-time Intermediate Flow Estimation) model. It enables users to generate recursivly smooth, high-quality intermediate frames between existing video frames, effectively increasing video frame rates, creating slow-motion effects, or enhancing the temporal consistency of generated video sequences.
 
 ## 🚀 Getting Started
 
@@ -22,7 +18,7 @@ Ensure you have the following installed:
 Clone the repository to your local machine:
 
 ```bash
-git clone [https://github.com/mehdinejjar86/recursive_rife.git](https://github.com/mehdinejjar86/recursive_rife.git)
+git clone git@github.com:mehdinejjar86/recursive_rife.git
 cd recursive_rife
 pip install -r requirements.txt
 ```
@@ -68,7 +64,7 @@ The `inference_img.py` script is the main entry point for performing interpolati
 To interpolate `15` frames between each pair of images in `./data/input_frames/` using the `rifev4_25` model, saving to `./data/output_frames/`:
 
 ```bash
-python inference_img.py --model ckpt/rifev4_25 --multi 17 --img ./data/input_frames --output ./data/output_frames
+python inference_img.py --model ckpt/rifev4_25 --multi 16 --img ./data/input_frames --output ./data/output_frames
 ```
 
 ---
@@ -80,7 +76,7 @@ This project offers two distinct interpolation modes: the standard direct approa
 ### 1\. Standard Interpolation (Recommended)
 
 - **How to use:** Do **NOT** include the `--recursive` flag in your command. This is the default behavior.
-- **Underlying Function:** `make_inference` (when `model.version >= 3.9`)
+- **Underlying Function:** `make_inference`
 - **Mechanism:** This mode directly utilizes the `timestep` parameter of the RIFE model's `inference` function. For a given `--multi N`, it calculates `N-2` intermediate frames by evenly distributing the `timestep` values across the `0` to `1` interval (e.g., `1/(N-1)`, `2/(N-1)`, ..., `(N-2)/(N-1)`).
 - **When to use:** This is the **recommended mode** for most modern RIFE models (especially versions 3.9 and higher, like `rifev4_25`). These models are typically trained to perform robustly across a continuous range of `timestep` values, providing the most flexible and consistent results for any `N` specified by `--multi`.
 
