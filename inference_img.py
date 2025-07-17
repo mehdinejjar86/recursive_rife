@@ -56,7 +56,6 @@ def make_inference_recusrive(I0, I1, n, model, scale=1.0):
         res = []
         flows = []
         masks = []
-
         original_n = n
 
         for i in range(n):
@@ -67,7 +66,6 @@ def make_inference_recusrive(I0, I1, n, model, scale=1.0):
                 flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
                 flows.append([flow])
                 masks.append([mask])
-        
         n -= 2
         I0 = res[0]
         I1 = res[-1]
@@ -85,7 +83,6 @@ def make_inference_recusrive(I0, I1, n, model, scale=1.0):
                     flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
                     flows[i].append(flow)
                     masks[i].append(mask)
-                
             I0 = res[middle_index-1]
             I1 = res[middle_index]
 
@@ -100,76 +97,9 @@ def make_inference_recusrive(I0, I1, n, model, scale=1.0):
                 flows.pop(-1)
                 masks.pop(-1)
 
+    else:
+        raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
     return res
-
-
-
-        
-# def make_inference_recusrive(I0, I1, n, model, scale=1.0):    
-#     if model.version >= 3.9:
-#         res = []
-#         flows = []
-#         masks = []
-#         while True:
-#             f = 0
-#             for i in range(n):
-#                 if i == 0 or i == n - 1:
-
-#                     if flows != []:
-#                         if i == 0:
-#                             prev_flows = flows[0]
-#                             prev_masks = masks[0]
-#                         else:
-#                             prev_flows = flows[-1]
-#                             prev_masks = masks[-1]
-
-#                         print(len(prev_flows), len(prev_masks))
-#                         res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale, prev_flows=prev_flows, prev_masks=prev_masks) 
-
-#                         if i == 0:
-#                             flows.pop(0)
-#                         elif i == n - 1:
-#                             try:
-#                                 flows.pop(-1)
-#                             except:
-#                                 pass
-#                     else:
-#                         res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale)
-
-                        
-
-#                     if len(res) == 0:
-#                         res.append(res_out) 
-#                     else:
-#                         middle_index = math.ceil(len(res) / 2)
-#                         res.insert(middle_index, res_out) 
-
-            
-                    
-                        
-#                 else:
-#                     flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
-
-#                     try:
-#                         flows[f].append(flow)
-#                         masks[f].append(mask)
-#                     except:
-#                         flows.append([flow])
-#                         masks.append([mask])
-#                     finally:
-#                         f += 1
-
-            
-            
-#             if flows == []:
-#                 break
-#             n -= 2
-#             I0 = res[middle_index-1]
-#             I1 = res[middle_index]
-
-#         return res
-#     else:
-#       raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
 
 def pad_image(img, padding):
         return F.pad(img, padding)
