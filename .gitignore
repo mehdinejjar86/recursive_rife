@@ -14,3 +14,5 @@ train_log/*
 *E30*
 metrics_results*
 *test*
+*confocal*
+*membrane*
