@@ -83,6 +83,7 @@ def make_inference_recusrive(I0, I1, n, model, scale=1.0):
                     flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
                     flows[i].append(flow)
                     masks[i].append(mask)
+                    
             I0 = res[middle_index-1]
             I1 = res[middle_index]
 
