@@ -26,3 +26,8 @@ def main():
   parser.add_argument('--k', dest='k', action=int, help='Number of anchor points for interpolation')
 
   args = parser.parse_args()
+
+  if not os.path.exists(args.output):
+    os.makedirs(args.output)
+
+  

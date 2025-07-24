@@ -6,105 +6,43 @@ import numpy as np
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
-import _thread
-from queue import Queue, Empty
-from model.pytorch_msssim import ssim_matlab
-import math
+import tifffile
 
-def clear_write_buffer(user_args, matched_extension, write_buffer):
-    cnt = 0
-    while True:
-        item = write_buffer.get()
-        if item is None:
-            break
-        path = os.path.join(user_args.output, f'{cnt:0>7d}{matched_extension}')
-        cv2.imwrite(path, item[:, :, ::-1])
-        cnt += 1
+def read_image(image_path, extension):
+  flag_cv2 = False
 
-def build_read_buffer(user_args, read_buffer, videogen):
-    try:
-        for frame in videogen:
-            frame = cv2.imread(os.path.join(user_args.img, frame), cv2.IMREAD_UNCHANGED)
-            # convert grayscale to BGR
-            if len(frame.shape) <  3:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            frame = frame[:, :, ::-1].copy()
-            read_buffer.put(frame)
-    except:
-        pass
-    read_buffer.put(None)
+  if extension == '.tif':
+    image = tifffile.imread(image_path)
+  else:
+    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    flag_cv2 = True
+  if len(image.shape) < 3:
+    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+  if flag_cv2:
+    image = image[:, :, ::-1].copy()  # Convert BGR to RGB
+  return image
+
+def save_image(tensor, output_path, name, extension, h, w, dtype=np.uint8, max_val=255.0):
+    
+  image = (tensor[0] * max_val).cpu().numpy().astype(dtype).transpose(1, 2, 0)[:h, :w]
+
+  output_path = os.path.join(output_path, f"{name:0>7d}{extension}")
+
+  if extension == '.tif':
+      tifffile.imwrite(output_path, image[:, :, ::-1])
+  else:
+      cv2.imwrite(output_path, image[:, :, ::-1])  # Convert RGB back to BGR for saving
 
 def make_inference(I0, I1, n, model, scale=1.0):    
-    if model.version >= 3.9:
-        res = []
-        for i in range(n):
-            res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
-        return res
-    else:
-        middle = model.inference(I0, I1, scale)
-        if n == 1:
-            return [middle]
-        first_half = make_inference(I0, middle, n=n//2, model=model)
-        second_half = make_inference(middle, I1, n=n//2, model=model)
-        if n % 2:
-            return [*first_half, middle, *second_half]
-        else:
-            return [*first_half, *second_half]
 
-def make_inference_recusrive(I0, I1, n, model, scale=1.0):    
-    if model.version >= 3.9:
-        res = []
-        flows = []
-        masks = []
-        original_n = n
-
-        for i in range(n):
-
-            if i == 0 or i == n - 1:
-                res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
-            else:
-                flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
-                flows.append([flow])
-                masks.append([mask])
-        n -= 2
-        I0 = res[0]
-        I1 = res[-1]
-
-        while len(res) != original_n:
-            for i in range(n):
-            
-                if i == 0 or i == n - 1:
-                    prev_flows = flows[0] if i == 0 else flows[i-1]
-                    prev_masks = masks[0] if i == 0 else masks[i-1]
-                    res_out = model.inference(I0, I1, (i+1) * 1. / (n+1), scale, prev_flows=prev_flows, prev_masks=prev_masks)
-                    middle_index = math.ceil(len(res) / 2) if len(res) != 0 else 0
-                    res.insert(middle_index, res_out)
-                else:
-                    flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
-                    flows[i].append(flow)
-                    masks[i].append(mask)
-                    
-            I0 = res[middle_index-1]
-            I1 = res[middle_index]
-
-            n -= 2
-
-            if len(res) == original_n:
-                break
-
-            if flows != []:
-                flows.pop(0)
-                masks.pop(0)
-                flows.pop(-1)
-                masks.pop(-1)
-
-    else:
-        raise NotImplementedError("Recursive inference is not implemented for versions below 3.9")
-    return res
+  res = []
+  for i in range(n):
+      res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
+  return res
 
 def pad_image(img, padding):
         return F.pad(img, padding)
-
 
 def main():
     
@@ -147,7 +85,6 @@ def main():
   model.eval()
   model.device()
 
-
   videogen = []
   image_extensions = ('.png', '.tif', '.jpg', '.jpeg', '.bmp', '.gif')
   matched_extension = None
@@ -169,107 +106,63 @@ def main():
 
   tot_frame = len(videogen)
   videogen.sort(key= lambda x:int(x[:-4]))
-  lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)
-  lastframe_dtype=lastframe.dtype
-  if lastframe_dtype == np.uint8:
-      max_val=255.
-  elif lastframe_dtype == np.uint16:
-      max_val=65535.
+
+  if matched_extension.lower() == '.tif':
+    lastframe = tifffile.imread(os.path.join(args.img, videogen[0]))
   else:
-      max_val=1.
+    lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)
+
+  lastframe_dtype = lastframe.dtype
+  if lastframe_dtype == np.uint8:
+    max_val=255.
+  elif lastframe_dtype == np.uint16:
+    max_val=65535.
+  else:
+    max_val=1.
+
+
+  print(f"Total frames: {tot_frame}, first frame shape: {lastframe.shape}, dtype: {lastframe_dtype}, max_val: {max_val}")
 
   if len(lastframe.shape) < 3:
-      lastframe = cv2.cvtColor(lastframe, cv2.COLOR_GRAY2BGR)
-  lastframe = lastframe[:, :, ::-1].copy()
-  videogen = videogen[1:]
+    lastframe = cv2.cvtColor(lastframe, cv2.COLOR_GRAY2BGR)
+
+    lastframe = lastframe[:, :, ::-1].copy()
+
   h, w, _ = lastframe.shape
 
   tmp = max(128, int(128 / args.scale))
   ph = ((h - 1) // tmp + 1) * tmp
   pw = ((w - 1) // tmp + 1) * tmp
   padding = (0, pw - w, 0, ph - h)
-  pbar = tqdm(total=tot_frame)
 
   if args.output is None:
       args.output = 'vid_out'
   if not os.path.exists(args.output):
       os.makedirs(args.output)
 
-  write_buffer = Queue(maxsize=500)
-  read_buffer = Queue(maxsize=500)
-  _thread.start_new_thread(build_read_buffer, (args, read_buffer, videogen))
-  _thread.start_new_thread(clear_write_buffer, (args, matched_extension, write_buffer))
-
   I1 = torch.from_numpy(np.transpose(lastframe.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
   I1 = pad_image(I1, padding=padding)
-  temp = None # save lastframe when processing static frame
 
-  while True:
-      if temp is not None:
-          frame = temp
-          temp = None
-      else:
-          frame = read_buffer.get()
-      if frame is None:
-          break
+  name = 0
+  save_image(I1, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
+
+  name += 1
+
+  for i in tqdm(range(len(videogen) - 1)):
       I0 = I1
+      frame = read_image(os.path.join(args.img, videogen[i + 1]), matched_extension)
       I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
       I1 = pad_image(I1, padding=padding)
-      I0_small = F.interpolate(I0, (32, 32), mode='bilinear', align_corners=False)
-      I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
-      ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
 
-      break_flag = False
-      if ssim > 0.996:
-          frame = read_buffer.get() # read a new frame
-          if frame is None:
-              break_flag = True
-              frame = lastframe
-          else:
-              temp = frame
-          I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
-          I1 = pad_image(I1, padding=padding)
-          I1 = model.inference(I0, I1, scale=args.scale)
-          I1_small = F.interpolate(I1, (32, 32), mode='bilinear', align_corners=False)
-          ssim = ssim_matlab(I0_small[:, :3], I1_small[:, :3])
-          frame = (I1[0] * max_val).cpu().numpy().astype(lastframe_dtype).transpose(1, 2, 0)[:h, :w]
-          
-      if ssim < 0.2:
-          output = []
-          for i in range(args.multi - 1):
-              output.append(I0)
-          '''
-          output = []
-          step = 1 / args.multi
-          alpha = 0
-          for i in range(args.multi - 1):
-              alpha += step
-              beta = 1-alpha
-              output.append(torch.from_numpy(np.transpose((cv2.addWeighted(frame[:, :, ::-1], alpha, lastframe[:, :, ::-1], beta, 0)[:, :, ::-1].copy()), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.)
-          '''
-      else:
-          if args.recursive:
-                output = make_inference_recusrive(I0, I1, args.multi - 1, model, scale=args.scale)
-          else:
-                output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
+      output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
 
-      write_buffer.put(lastframe)
       for mid in output:
-          mid = (((mid[0] * max_val).cpu().numpy().astype(lastframe_dtype).transpose(1, 2, 0)))
-          write_buffer.put(mid[:h, :w])
-      pbar.update(1)
-      lastframe = frame
-      if break_flag:
-          break
+          save_image(mid, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
+          name += 1
 
+      save_image(I1, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
+      name += 1
 
-  write_buffer.put(lastframe)
-  write_buffer.put(None)  
-
-  import time
-  while(not write_buffer.empty()):
-      time.sleep(0.1)
-  pbar.close()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+      
