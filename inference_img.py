@@ -15,7 +15,7 @@ def main():
   warnings.filterwarnings("ignore")
 
   parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
-  parser.add_argument('--model', dest='modelDir', type=str, default='rifev4_25', help='directory with trained model files')
+  parser.add_argument('--model', dest='modelDir', type=str, default='ckpt/rifev4_25', help='directory with trained model files')
   parser.add_argument('--UHD', dest='UHD', action='store_true', help='support 4k images')
   parser.add_argument('--scale', dest='scale', type=float, default=1.0, help='Try scale=0.5 for 4k')
   parser.add_argument('--multi', dest='multi', type=int, default=2)
@@ -42,7 +42,7 @@ def main():
 
   torch.set_grad_enabled(False)
 
-  from rifev4_25.RIFE_HDv3 import Model
+  from ckpt.rifev4_25.RIFE_HDv3 import Model
   model = Model()
   if not hasattr(model, 'version'):
       model.version = 0
