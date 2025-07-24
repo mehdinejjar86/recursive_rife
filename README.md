@@ -34,9 +34,9 @@ You will need a pre-trained RIFE model checkpoint.
       recursive_rife/
       ├── ckpt/
       │   └── rifev4_25/
-      │       └── model.pkl
+      │       └── flownet.pkl
       │       └── (any_other_model_files.py)
-      ├── inference_img.py
+      ├── inference.py
       ├── (other project files)
       └── README.md
       ```
