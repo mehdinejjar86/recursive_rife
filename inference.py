@@ -7,6 +7,8 @@ from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
 import tifffile
+from inference.regular import make_inference
+from inference.recursive import make_inference_recursive
 
 def read_image(image_path, extension):
   flag_cv2 = False
@@ -33,13 +35,6 @@ def save_image(tensor, output_path, name, extension, h, w, dtype=np.uint8, max_v
       tifffile.imwrite(output_path, image[:, :, ::-1])
   else:
       cv2.imwrite(output_path, image[:, :, ::-1])  # Convert RGB back to BGR for saving
-
-def make_inference(I0, I1, n, model, scale=1.0):    
-
-  res = []
-  for i in range(n):
-      res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
-  return res
 
 def pad_image(img, padding):
         return F.pad(img, padding)
@@ -107,28 +102,20 @@ def main():
   tot_frame = len(videogen)
   videogen.sort(key= lambda x:int(x[:-4]))
 
-  if matched_extension.lower() == '.tif':
-    lastframe = tifffile.imread(os.path.join(args.img, videogen[0]))
-  else:
-    lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)
+  frame = read_image(os.path.join(args.img, videogen[0]), matched_extension)
 
-  lastframe_dtype = lastframe.dtype
-  if lastframe_dtype == np.uint8:
+  frame_dtype = frame.dtype
+  if frame_dtype == np.uint8:
     max_val=255.
-  elif lastframe_dtype == np.uint16:
+  elif frame_dtype == np.uint16:
     max_val=65535.
   else:
     max_val=1.
 
 
-  print(f"Total frames: {tot_frame}, first frame shape: {lastframe.shape}, dtype: {lastframe_dtype}, max_val: {max_val}")
+  print(f"Total frames: {tot_frame}, first frame shape: {frame.shape}, dtype: {frame_dtype}, max_val: {max_val}")
 
-  if len(lastframe.shape) < 3:
-    lastframe = cv2.cvtColor(lastframe, cv2.COLOR_GRAY2BGR)
-
-    lastframe = lastframe[:, :, ::-1].copy()
-
-  h, w, _ = lastframe.shape
+  h, w, _ = frame.shape
 
   tmp = max(128, int(128 / args.scale))
   ph = ((h - 1) // tmp + 1) * tmp
@@ -140,28 +127,31 @@ def main():
   if not os.path.exists(args.output):
       os.makedirs(args.output)
 
-  I1 = torch.from_numpy(np.transpose(lastframe.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+  I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
   I1 = pad_image(I1, padding=padding)
 
   name = 0
-  save_image(I1, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
+  save_image(I1, args.output, name, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
 
   name += 1
 
   for i in tqdm(range(len(videogen) - 1)):
-      I0 = I1
-      frame = read_image(os.path.join(args.img, videogen[i + 1]), matched_extension)
-      I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
-      I1 = pad_image(I1, padding=padding)
+    I0 = I1
+    frame = read_image(os.path.join(args.img, videogen[i + 1]), matched_extension)
+    I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+    I1 = pad_image(I1, padding=padding)
 
+    if args.recursive:
+      output = make_inference_recursive(I0, I1, args.multi - 1, model, scale=args.scale)
+    else:
       output = make_inference(I0, I1, args.multi - 1, model, scale=args.scale)
 
-      for mid in output:
-          save_image(mid, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
-          name += 1
-
-      save_image(I1, args.output, name, matched_extension, h, w, dtype=lastframe_dtype, max_val=max_val)
+    for mid in output:
+      save_image(mid, args.output, name, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
       name += 1
+
+    save_image(I1, args.output, name, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
+    name += 1
 
 if __name__ == "__main__":
     main()
