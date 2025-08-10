@@ -8,6 +8,7 @@ from torch.nn import functional as F
 import warnings
 from model.pytorch_msssim import ssim_matlab
 from utility.imaging import read_image, save_image, pad_image
+import json
 
 def main():
 
@@ -163,6 +164,11 @@ def main():
       ssim_report[frame] = ssim_value.item()      
       
       save_image(output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
+  # Save SSIM report
+  ssim_report_path = os.path.join(args.output, 'ssim_report.json')
+  with open(ssim_report_path, 'w') as f:
+      json.dump(ssim_report, f, indent=2)
+
 
   
 if __name__ == "__main__":
