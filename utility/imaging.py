@@ -20,7 +20,7 @@ def read_image(image_path, extension):
 
 def save_image(tensor, output_path, name, extension, h, w, dtype, max_val):
     
-  image = (tensor[0] * max_val).cpu().numpy().astype(dtype).transpose(1, 2, 0)[:h, :w]
+  image = (tensor[0] * max_val).cpu().detach().numpy().astype(dtype).transpose(1, 2, 0)[:h, :w]
 
   output_path = os.path.join(output_path, f"{name:0>7d}{extension}")
 

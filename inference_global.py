@@ -16,12 +16,11 @@ def main():
   parser = argparse.ArgumentParser(
       description='Interpolation for a pair of images')
   parser.add_argument('--model', dest='modelDir', type=str,
-                      default='rifev4_25', help='directory with trained model files')
+                      default='ckpt/rifev4_25', help='directory with trained model files')
   parser.add_argument('--UHD', dest='UHD',
                       action='store_true', help='support 4k images')
   parser.add_argument('--scale', dest='scale', type=float,
                       default=1.0, help='Try scale=0.5 for 4k')
-  parser.add_argument('--multi', dest='multi', type=int, default=2)
   parser.add_argument('--img', dest='img', type=str,
                       default="Images path", help='input image directory')
   parser.add_argument('--output', dest='output', type=str,
@@ -55,7 +54,7 @@ def main():
 
   print(f"Using device: {device}")
   
-  from rifev4_25.RIFE_HDv3 import Model
+  from ckpt.rifev4_25.RIFE_HDv3 import Model
   model = Model()
   if not hasattr(model, 'version'):
       model.version = 0
@@ -109,36 +108,54 @@ def main():
   padding = (0, pw - w, 0, ph - h)
   
   
+  
+
+  num_flows = args.anchor
+
+  # Define exponential decay factor (you can adjust this value)
+  decay_factor = 3  # You can experiment with different values
+
+  # Calculate exponential weights
+  indices = torch.arange(0, num_flows, device=device, dtype=torch.float32)
+  flows_weights = torch.exp(-decay_factor * indices)
+
+  # Reverse the weights so the most recent flows have the highest weight
+  flows_weights = flows_weights.flip(0)
+
+  # Normalize the weights so they sum to 1
+  flows_weights = flows_weights / flows_weights.sum()
+  
   for i in tqdm(range(len(videogen) - 1)):
     if i < args.anchor - 1 or i >= tot_frame - args.anchor:
-      print(f"Im here {i}")
+
       continue
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
       flows = []
       masks = []
-      for anchor in range(args.anchor):
+      for anchor in reversed(range(args.anchor)):
         I0_index = i - anchor
         I1_index = i + anchor + 1
         timestep = (frame - ground_truth[I0_index]) / (ground_truth[I1_index] - ground_truth[I0_index])
-        print(f"ground truth: {ground_truth[I0_index]} {ground_truth[I1_index]}, frame: {frame}, timestep: {timestep}")
         
         I0 = read_image(os.path.join(args.img, videogen[I0_index]), matched_extension)
-        I1 = read_image(os.path.join(args.img, videogen[I1_index]), matched_extension)
-        
         I0 = torch.from_numpy(np.transpose(I0.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
-        I0 = pad_image(I1, padding=padding)
-        I1 = torch.from_numpy(np.transpose(frame.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+        I0 = pad_image(I0, padding=padding)
+        
+        I1 = read_image(os.path.join(args.img, videogen[I1_index]), matched_extension)
+        I1 = torch.from_numpy(np.transpose(I1.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
         I1 = pad_image(I1, padding=padding)
         
-        
-        
         flow, mask = model.flow_extractor(I0, I1, timestep, args.scale)
+
         
         flows.append(flow)
         masks.append(mask)
       
-        
+      output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
+      save_image(output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
+      
+    
 
       
 

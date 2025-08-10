@@ -164,48 +164,41 @@ class IFNet(nn.Module):
 
         return flow_list, mask_list, merged
     
-    def forward_global(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False):
-        if training == False:
-            channel = x.shape[1] // 2
-            img0 = x[:, :channel]
-            img1 = x[:, channel:]
+    def forward_global(self, x,  flows, masks, betas, timestep=0.5, scale_list=[8, 4, 2, 1], training=False):
+
+        channel = x.shape[1] // 2
+        img0 = x[:, :channel]
+        img1 = x[:, channel:]
         if not torch.is_tensor(timestep):
             timestep = (x[:, :1].clone() * 0 + 1) * timestep
         else:
             timestep = timestep.repeat(1, 1, img0.shape[2], img0.shape[3])
-        f0 = self.encode(img0[:, :3])
-        f1 = self.encode(img1[:, :3])
+
         flow_list = []
         merged = []
         mask_list = []
         warped_img0 = img0
         warped_img1 = img1
-        flow = None
-        mask = None
-        loss_cons = 0
-        block = [self.block0, self.block1, self.block2, self.block3, self.block4]
-
+        
+        global_flow = None
+        global_mask = None
+        
+        assert len(flows) == len(masks) == len(betas), "flows, masks and betas must have the same length"
+        
         for i in range(5):
-            if flow is None:
-                flow, mask, feat = block[i](torch.cat((img0[:, :3], img1[:, :3], f0, f1, timestep), 1), None, scale=scale_list[i])
-
-            else:
-                wf0 = warp(f0, flow[:, :2])
-                wf1 = warp(f1, flow[:, 2:4])
-                fd, mask, feat = block[i](torch.cat((warped_img0[:, :3], warped_img1[:, :3], wf0, wf1, timestep, mask, feat), 1), flow, scale=scale_list[i])
-                flow = flow + fd
-            mask_list.append(mask)
-            flow_list.append(flow)
-            warped_img0 = warp(img0, flow[:, :2])
-            warped_img1 = warp(img1, flow[:, 2:4])
+            for n in range(len(flows)):
+                global_flow = flows[n][i] * betas[n] if global_flow is None else global_flow + flows[n][i] * betas[n]
+                global_mask = masks[n][i] * betas[n] if global_mask is None else global_mask + masks[n][i] * betas[n]
+            warped_img0 = warp(img0, global_flow[:, :2])
+            warped_img1 = warp(img1, global_flow[:, 2:4])
             merged.append((warped_img0, warped_img1))
 
-        mask = torch.sigmoid(mask)
-            
-
+        mask = torch.sigmoid(masks[-1][-1])
+        
         merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
-
+        
         return flow_list, mask_list, merged
+
 
     def forward_recusrive(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False, fastmode=True, ensemble=False, prev_flows=[], prev_masks=[]):
         if training == False:
