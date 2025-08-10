@@ -64,7 +64,13 @@ class Model:
     def inference(self, img0, img1, timestep=0.5, scale=1.0, prev_flows=[], prev_masks=[]):
         imgs = torch.cat((img0, img1), 1)
         scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
-        flow, mask, merged = self.flownet(imgs, timestep, scale_list, prev_flows=prev_flows, prev_masks=prev_masks)
+        flow, mask, merged = self.flownet(imgs, timestep, scale_list)
+        return merged[-1]
+    
+    def inference_recursive(self, img0, img1, timestep=0.5, scale=1.0, prev_flows=[], prev_masks=[]):
+        imgs = torch.cat((img0, img1), 1)
+        scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
+        flow, mask, merged = self.flownet.forward_recusrive(imgs, timestep, scale_list, prev_flows=prev_flows, prev_masks=prev_masks)
         return merged[-1]
     
     def flow_extractor(self, img0, img1, timestep=0.5, scale=1.0):

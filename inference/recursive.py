@@ -10,7 +10,7 @@ def make_inference_recursive(I0, I1, n, model, scale=1.0):
     for i in range(n):
 
         if i == 0 or i == n - 1:
-            res.append(model.inference(I0, I1, (i+1) * 1. / (n+1), scale))
+            res.append(model.inference_recursive(I0, I1, (i+1) * 1. / (n+1), scale))
         else:
             flow, mask = model.flow_extractor(I0, I1, (i+1) * 1. / (n+1), scale)
             flows.append([flow])
