@@ -106,9 +106,6 @@ def main():
   ph = ((h - 1) // tmp + 1) * tmp
   pw = ((w - 1) // tmp + 1) * tmp
   padding = (0, pw - w, 0, ph - h)
-  
-  
-  
 
   num_flows = args.anchor
 
@@ -147,17 +144,12 @@ def main():
         I1 = pad_image(I1, padding=padding)
         
         flow, mask = model.flow_extractor(I0, I1, timestep, args.scale)
-
         
         flows.append(flow)
         masks.append(mask)
       
       output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
       save_image(output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
-      
-    
-
-      
 
   
 if __name__ == "__main__":
