@@ -292,16 +292,16 @@ class IFNet(nn.Module):
     
 
 
-    #     merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
-    #     if not fastmode:
-    #         print('contextnet is removed')
-    #         '''
-    #         c0 = self.contextnet(img0, flow[:, :2])
-    #         c1 = self.contextnet(img1, flow[:, 2:4])
-    #         tmp = self.unet(img0, img1, warped_img0, warped_img1, mask, flow, c0, c1)
-    #         res = tmp[:, :3] * 2 - 1
-    #         merged[4] = torch.clamp(merged[4] + res, 0, 1)
-    #         '''
-    #     return flow_list, mask_list[4], merged
+        merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
+        if not fastmode:
+            print('contextnet is removed')
+            '''
+            c0 = self.contextnet(img0, flow[:, :2])
+            c1 = self.contextnet(img1, flow[:, 2:4])
+            tmp = self.unet(img0, img1, warped_img0, warped_img1, mask, flow, c0, c1)
+            res = tmp[:, :3] * 2 - 1
+            merged[4] = torch.clamp(merged[4] + res, 0, 1)
+            '''
+        return flow_list, mask_list[4], merged
 
 
