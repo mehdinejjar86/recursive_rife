@@ -193,7 +193,8 @@ class IFNet(nn.Module):
             warped_img1 = warp(img1, global_flow[:, 2:4])
             merged.append((warped_img0, warped_img1))
 
-        mask = torch.sigmoid(masks[-1][-1])
+        #mask = torch.sigmoid(masks[-1][-1])
+        mask = torch.sigmoid(global_mask)
         
         merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
         

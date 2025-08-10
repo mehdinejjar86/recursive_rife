@@ -110,7 +110,7 @@ def main():
   num_flows = args.anchor
 
   # Define exponential decay factor (you can adjust this value)
-  decay_factor = 7.5  # You can experiment with different values
+  decay_factor = 6.7  # You can experiment with different values
 
   # Calculate exponential weights
   indices = torch.arange(0, num_flows, device=device, dtype=torch.float32)
