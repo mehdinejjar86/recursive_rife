@@ -3,7 +3,7 @@ import cv2
 import torch
 import argparse
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from torch.nn import functional as F
 import warnings
 from model.pytorch_msssim import ssim_matlab
@@ -111,7 +111,7 @@ def main():
   num_flows = args.anchor
 
   # Define exponential decay factor (you can adjust this value)
-  decay_factor = 6.7  # You can experiment with different values
+  decay_factor = 2.5  # You can experiment with different values
 
   # Calculate exponential weights
   indices = torch.arange(0, num_flows, device=device, dtype=torch.float32)
@@ -125,20 +125,26 @@ def main():
 
   print(f"Flows weights: {flows_weights}")
   
-  ssim_report = {}
-  
-  
-  for i in tqdm(range(len(videogen) - 1)):
-    if i < args.anchor - 1 or i >= tot_frame - args.anchor:
+  pairs = trange(len(videogen) - 1)
+  pairs.set_description("Processing frames")
 
+  for i in pairs:
+    if i < args.anchor - 1 or i >= tot_frame - args.anchor:
       continue
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
+
       flows = []
       masks = []
       for anchor in reversed(range(args.anchor)):
+        
         I0_index = i - anchor
         I1_index = i + anchor + 1
+        pairs.set_postfix({
+            'I0': ground_truth[I0_index],
+            'I1': ground_truth[I1_index],
+            'frame': frame
+        })
         timestep = (frame - ground_truth[I0_index]) / (ground_truth[I1_index] - ground_truth[I0_index])
         
         I0 = read_image(os.path.join(args.img, videogen[I0_index]), matched_extension)
@@ -154,20 +160,10 @@ def main():
         flows.append(flow)
         masks.append(mask)
       
-      output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
-      I_gt = read_image(os.path.join(args.img, f"{frame}{matched_extension}"), matched_extension)
-      I_gt = torch.from_numpy(np.transpose(I_gt.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
-      I_gt = pad_image(I_gt, padding=padding)
+      I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
       
-      ssim_value = ssim_matlab(output, I_gt, data_range=max_val)
-      
-      ssim_report[frame] = ssim_value.item()      
-      
-      save_image(output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
-  # Save SSIM report
-  ssim_report_path = os.path.join(args.output, 'ssim_report.json')
-  with open(ssim_report_path, 'w') as f:
-      json.dump(ssim_report, f, indent=2)
+      save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
+
 
 
   

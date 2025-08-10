@@ -76,13 +76,13 @@ class Model:
     def inference_global(self, img0, img1,flows, masks, betas, timestep=0.5, scale=1.0):
         imgs = torch.cat((img0, img1), 1)
         scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
-        flow, mask, merged = self.flownet.forward_global(imgs, flows, masks, betas, timestep, scale_list)
-        return merged[-1]
+        merged = self.flownet.forward_global(imgs, flows, masks, betas, timestep, scale_list)
+        return merged
     
     def flow_extractor(self, img0, img1, timestep=0.5, scale=1.0):
         imgs = torch.cat((img0, img1), 1)
         scale_list = [16/scale, 8/scale, 4/scale, 2/scale, 1/scale]
         flow, mask, merged = self.flownet(imgs, timestep, scale_list)
-        return flow, mask
+        return flow[-1], mask[-1]
     
 

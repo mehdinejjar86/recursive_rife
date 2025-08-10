@@ -174,9 +174,6 @@ class IFNet(nn.Module):
         else:
             timestep = timestep.repeat(1, 1, img0.shape[2], img0.shape[3])
 
-        flow_list = []
-        merged = []
-        mask_list = []
         warped_img0 = img0
         warped_img1 = img1
         
@@ -185,20 +182,18 @@ class IFNet(nn.Module):
         
         assert len(flows) == len(masks) == len(betas), "flows, masks and betas must have the same length"
         
-        for i in range(5):
-            for n in range(len(flows)):
-                global_flow = flows[n][i] * betas[n] if global_flow is None else global_flow + flows[n][i] * betas[n]
-                global_mask = masks[n][i] * betas[n] if global_mask is None else global_mask + masks[n][i] * betas[n]
+
+        for n in range(len(flows)):
+            global_flow = flows[n] * betas[n] if global_flow is None else global_flow + flows[n] * betas[n]
+            global_mask = masks[n] * betas[n] if global_mask is None else global_mask + masks[n] * betas[n]
             warped_img0 = warp(img0, global_flow[:, :2])
             warped_img1 = warp(img1, global_flow[:, 2:4])
-            merged.append((warped_img0, warped_img1))
+
 
         #mask = torch.sigmoid(masks[-1][-1])
         mask = torch.sigmoid(global_mask)
         
-        merged[4] = (warped_img0 * mask + warped_img1 * (1 - mask))
-        
-        return flow_list, mask_list, merged
+        return (warped_img0 * mask + warped_img1 * (1 - mask))
 
 
     def forward_recusrive(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False, fastmode=True, ensemble=False, prev_flows=[], prev_masks=[]):
