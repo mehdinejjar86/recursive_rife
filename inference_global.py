@@ -124,6 +124,9 @@ def main():
 
   print(f"Flows weights: {flows_weights}")
   
+  ssim_report = {}
+  
+  
   for i in tqdm(range(len(videogen) - 1)):
     if i < args.anchor - 1 or i >= tot_frame - args.anchor:
 
@@ -151,6 +154,14 @@ def main():
         masks.append(mask)
       
       output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
+      I_gt = read_image(os.path.join(args.img, f"{frame}{matched_extension}"), matched_extension)
+      I_gt = torch.from_numpy(np.transpose(I_gt.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
+      I_gt = pad_image(I_gt, padding=padding)
+      
+      ssim_value = ssim_matlab(output, I_gt, data_range=max_val)
+      
+      ssim_report[frame] = ssim_value.item()      
+      
       save_image(output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
 
   
