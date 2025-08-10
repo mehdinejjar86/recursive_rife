@@ -110,7 +110,7 @@ def main():
   num_flows = args.anchor
 
   # Define exponential decay factor (you can adjust this value)
-  decay_factor = 3  # You can experiment with different values
+  decay_factor = 7.5  # You can experiment with different values
 
   # Calculate exponential weights
   indices = torch.arange(0, num_flows, device=device, dtype=torch.float32)
@@ -121,6 +121,8 @@ def main():
 
   # Normalize the weights so they sum to 1
   flows_weights = flows_weights / flows_weights.sum()
+
+  print(f"Flows weights: {flows_weights}")
   
   for i in tqdm(range(len(videogen) - 1)):
     if i < args.anchor - 1 or i >= tot_frame - args.anchor:
