@@ -127,13 +127,21 @@ def main():
   
   pairs = trange(len(videogen) - 1)
   pairs.set_description("Processing frames")
+  
+  dataset_path = "dataset_fusion"
+  
+  if not os.path.exists(dataset_path):
+    os.makedirs(dataset_path)
 
   for i in pairs:
     if i < args.anchor - 1 or i >= tot_frame - args.anchor:
       continue
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
-
+      frame_path = os.path.join(dataset_path, f"{frame:0>7d}")
+      if not os.path.exists(frame_path):
+        os.makedirs(frame_path)
+        
       flows = []
       masks = []
       for anchor in reversed(range(args.anchor)):
@@ -163,6 +171,14 @@ def main():
       I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
       
       save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
+      np.save(os.path.join(frame_path, f"I0_{anchor}.npy"), I0.cpu().numpy())
+      np.save(os.path.join(frame_path, f"I1_{anchor}.npy"), I1.cpu().numpy())
+      # save all flows as numpy arrays
+      np.save(os.path.join(frame_path, f"flows_{anchor}.npy"), torch.stack(flows).cpu().numpy())
+      # save all masks as numpy arrays
+      np.save(os.path.join(frame_path, f"masks_{anchor}.npy"), torch.stack(masks).cpu().numpy())
+      
+      
 
 
 
