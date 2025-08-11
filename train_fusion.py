@@ -37,10 +37,10 @@ for epoch in range(num_epochs):
     total_ssim = 0  # Initialize total SSIM score for the epoch
     loop = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}", ncols=100, position=0, leave=True)
 
-    for i, (I0, I1, flows, masks, l_gt) in enumerate(loop):
-        
+    for i, (I0, I1, flows, masks, I_gt) in enumerate(loop):
+        print(I0.shape, I1.shape, flows.shape, masks.shape, I_gt.shape)  # Debugging shapes
         # Move data to the appropriate device
-        I0, I1, flows, masks, l_gt = I0.to(device), I1.to(device), flows.to(device), masks.to(device), l_gt.to(device)
+        I0, I1, flows, masks, I_gt = I0.to(device), I1.to(device), flows.to(device), masks.to(device), I_gt.to(device)
 
         # Zero the gradients
         optimizer.zero_grad()
@@ -49,7 +49,7 @@ for epoch in range(num_epochs):
         out, f01_comb, f10_comb, m_comb, weights = model(I0, I1, flows, masks)
 
         # Compute SSIM loss between the model output and ground truth
-        loss_ssim = criterion_ssim(out, l_gt)  # Use SSIM loss
+        loss_ssim = criterion_ssim(out, I_gt)  # Use SSIM loss
         total_loss += loss_ssim.item()
 
         # Backward pass and optimization
@@ -57,7 +57,7 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         # Accumulate SSIM score (1 - SSIM, since we want to minimize)
-        ssim_value = ssim(out, l_gt, data_range=1, size_average=True)
+        ssim_value = ssim(out, I_gt, data_range=1, size_average=True)
         total_ssim += ssim_value.item()
 
         # Update progress bar description with the current loss and SSIM

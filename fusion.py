@@ -51,6 +51,8 @@ class PixelFlowFusionNetwork(nn.Module):
         K = len(flows)
         assert K == len(masks) and K > 0, "Need same number of flows and masks (>0)."
         N, C, H, W = I0.shape
+
+        print(f"Input shapes: I0={I0.shape}, I1={I1.shape}, flows={len(flows)}, masks={len(masks)}")
         assert I1.shape == (N, C, H, W), "I0 and I1 must have same shape."
 
         for f, m in zip(flows, masks):
