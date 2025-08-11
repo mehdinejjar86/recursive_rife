@@ -177,7 +177,7 @@ class IFNet(nn.Module):
         warped_img0 = img0
         warped_img1 = img1
         
-        print(f"img0 shape: {img0.shape}, img1 shape: {img1.shape}, flows length: {len(flows)}, masks length: {len(masks)}, betas length: {len(betas)}")
+        print(f"img0 shape: {img0.shape}, img1 shape: {img1.shape}, flows length: {flows[0].shape}, masks length: {masks[0].shape}, betas length: {len(betas)}")
         
         global_flow = None
         global_mask = None
@@ -194,6 +194,7 @@ class IFNet(nn.Module):
 
         #mask = torch.sigmoid(masks[-1][-1])
         mask = torch.sigmoid(global_mask)
+        print(f"mask shape: {mask.shape}, warped_img0 shape: {warped_img0.shape}, warped_img1 shape: {warped_img1.shape}")
         
         return (warped_img0 * mask + warped_img1 * (1 - mask))
 
