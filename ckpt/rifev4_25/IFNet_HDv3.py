@@ -177,6 +177,8 @@ class IFNet(nn.Module):
         warped_img0 = img0
         warped_img1 = img1
         
+        print(f"img0 shape: {img0.shape}, img1 shape: {img1.shape}, flows length: {len(flows)}, masks length: {len(masks)}, betas length: {len(betas)}")
+        
         global_flow = None
         global_mask = None
         

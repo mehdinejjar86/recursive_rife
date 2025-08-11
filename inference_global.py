@@ -173,7 +173,7 @@ def main():
         
         flows.append(flow)
         masks.append(mask)
-
+      
       I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
       
       save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
