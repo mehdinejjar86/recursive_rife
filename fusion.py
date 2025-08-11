@@ -29,7 +29,7 @@ class PixelFlowFusionNetwork(nn.Module):
     Per-pixel fusion of K candidate flows + masks using learned score maps.
 
     Inputs:
-      I0, I1: [N, C, H, W]
+      I0, I1: [N, 1, C, H, W]
       flows:  list length K, each [N, 4, 1, 4, H, W] with [:,:2]=f01, [:,2:4]=f10
       masks:  list length K, each [N, 1, 1, 1, H, W]
 
@@ -42,7 +42,7 @@ class PixelFlowFusionNetwork(nn.Module):
     """
     def __init__(self, img_channels=3):
         super().__init__()
-        in_ch = 2 * img_channels + 5
+        in_ch = 2 * img_channels + 5  # For I0, I1 (C), f01, f10, m
         self.score_net = ScoreNet(in_ch)
 
     def forward(self, I0, I1, flows, masks):
@@ -52,8 +52,12 @@ class PixelFlowFusionNetwork(nn.Module):
         K = len(flows)
         assert K == len(masks) and K > 0, "Need same number of flows and masks (>0)."
         
-        N, C, H, W = I0.shape
-        assert I1.shape == (N, C, H, W), "I0 and I1 must have the same shape."
+        N, _, C, H, W = I0.shape  # Get the shape of I0 (N, 1, C, H, W)
+        assert I1.shape == (N, 1, C, H, W), "I0 and I1 must have the same shape."
+
+        # Squeeze the singleton dimension (second dimension) of I0 and I1 to match [N, C, H, W]
+        I0 = I0.squeeze(1)  # Shape: [N, C, H, W]
+        I1 = I1.squeeze(1)  # Shape: [N, C, H, W]
 
         # Ensure correct dimensions for flows and masks
         flows = [f.squeeze(2) for f in flows]  # Shape: [N, 4, H, W]
