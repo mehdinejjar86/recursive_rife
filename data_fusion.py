@@ -23,15 +23,15 @@ class FlowMaskDataset(Dataset):
 
         # Load I0 and I1
         I0 = np.load(os.path.join(folder_path, 'I0.npy'))
-        I0 = I0.squeeze(0)  
+
         I1 = np.load(os.path.join(folder_path, 'I1.npy'))
-        I1 = I1.squeeze(0)
+
 
         # Load flows and masks
         flows = np.load(os.path.join(folder_path, 'flows.npy'))
-        flows = flows.squeeze(1)
+
         masks = np.load(os.path.join(folder_path, 'masks.npy'))
-        masks = masks.squeeze(1)
+
 
         # Load ground truth if needed
         l_gt = np.load(os.path.join(folder_path, 'I_gt.npy'))
