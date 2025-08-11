@@ -174,9 +174,9 @@ def main():
       np.save(os.path.join(frame_path, f"I0_{anchor}.npy"), I0.cpu().numpy())
       np.save(os.path.join(frame_path, f"I1_{anchor}.npy"), I1.cpu().numpy())
       # save all flows as numpy arrays
-      np.save(os.path.join(frame_path, f"flows_{anchor}.npy"), torch.stack(flows).cpu().numpy())
+      np.save(os.path.join(frame_path, f"flows_{anchor}.npy"), torch.stack(flows).cpu().detach().numpy())
       # save all masks as numpy arrays
-      np.save(os.path.join(frame_path, f"masks_{anchor}.npy"), torch.stack(masks).cpu().numpy())
+      np.save(os.path.join(frame_path, f"masks_{anchor}.npy"), torch.stack(masks).cpu().detach().numpy())
       
       
 
