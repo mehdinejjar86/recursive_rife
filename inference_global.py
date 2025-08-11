@@ -139,7 +139,7 @@ def main():
       continue
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
-      frame_path = os.path.join(dataset_path, f"{frame:0>7d}")
+      frame_path = os.path.join(dataset_path, f"{frame:0>7d}_a{args.anchor}")
       if not os.path.exists(frame_path):
         os.makedirs(frame_path)
         
@@ -164,7 +164,7 @@ def main():
         I1 = torch.from_numpy(np.transpose(I1.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
         I1 = pad_image(I1, padding=padding)
         
-        I_gt = read_image(os.path.join(gt_path, f"{frame:0>7d}.png"), matched_extension)
+        I_gt = read_image(os.path.join(gt_path, f"{frame}{matched_extension}"), matched_extension)
         I_gt = torch.from_numpy(np.transpose(I_gt.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
         I_gt = pad_image(I_gt, padding=padding)
         
@@ -177,13 +177,13 @@ def main():
       I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
       
       save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
-      np.save(os.path.join(frame_path, f"I0_{anchor}.npy"), I0.cpu().numpy())
-      np.save(os.path.join(frame_path, f"I1_{anchor}.npy"), I1.cpu().numpy())
-      np.save(os.path.join(frame_path, f"I_gt_{anchor}.npy"), I_gt.cpu().numpy())
+      np.save(os.path.join(frame_path, f"I0.npy"), I0.cpu().numpy())
+      np.save(os.path.join(frame_path, f"I1.npy"), I1.cpu().numpy())
+      np.save(os.path.join(frame_path, f"I_gt.npy"), I_gt.cpu().numpy())
       # save all flows as numpy arrays
-      np.save(os.path.join(frame_path, f"flows_{anchor}.npy"), torch.stack(flows).cpu().detach().numpy())
+      np.save(os.path.join(frame_path, f"flows.npy"), torch.stack(flows).cpu().detach().numpy())
       # save all masks as numpy arrays
-      np.save(os.path.join(frame_path, f"masks_{anchor}.npy"), torch.stack(masks).cpu().detach().numpy())
+      np.save(os.path.join(frame_path, f"masks.npy"), torch.stack(masks).cpu().detach().numpy())
       
       
 
