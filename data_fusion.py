@@ -30,7 +30,7 @@ class FlowMaskDataset(Dataset):
         masks = np.load(os.path.join(folder_path, 'masks.npy'))
 
         # Load ground truth if needed
-        l_gt = np.load(os.path.join(folder_path, 'l_gt.npy'))
+        l_gt = np.load(os.path.join(folder_path, 'I_gt.npy'))
 
         # Convert to torch tensors
         I0 = torch.tensor(I0, dtype=torch.float32)
