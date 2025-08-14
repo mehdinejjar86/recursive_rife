@@ -9,6 +9,7 @@ import warnings
 from model.pytorch_msssim import ssim_matlab
 from utility.imaging import read_image, save_image, pad_image
 import json
+from fusion import PixelFlowFusionNetwork
 
 def main():
 
@@ -55,14 +56,6 @@ def main():
 
   print(f"Using device: {device}")
   
-  from ckpt.rifev4_25.RIFE_HDv3 import Model
-  model = Model()
-  if not hasattr(model, 'version'):
-      model.version = 0
-  model.load_model(args.modelDir, -1)
-  print("Loaded 3.x/4.x HD model.")
-  model.eval()
-  model.device()
 
   videogen = []
   image_extensions = ('.png', '.tif', '.jpg', '.jpeg', '.bmp', '.gif')
@@ -110,26 +103,11 @@ def main():
 
   num_flows = args.anchor
 
-  # Define exponential decay factor (you can adjust this value)
-  decay_factor = 2.5  # You can experiment with different values
-
-  # Calculate exponential weights
-  indices = torch.arange(0, num_flows, device=device, dtype=torch.float32)
-  flows_weights = torch.exp(-decay_factor * indices)
-
-  # Reverse the weights so the most recent flows have the highest weight
-  flows_weights = flows_weights.flip(0)
-
-  # Normalize the weights so they sum to 1
-  flows_weights = flows_weights / flows_weights.sum()
-
-  print(f"Flows weights: {flows_weights}")
   
   pairs = trange(len(videogen) - 1)
   pairs.set_description("Processing frames")
   
-  dataset_path = "dataset_fusion"
-  gt_path = "E30_c1"
+  fusion = PixelFlowFusionNetwork(img_channels=3, hid=64).to(device)
 
   for i in pairs:
     if i < args.anchor - 1 or i >= tot_frame - args.anchor:
@@ -137,17 +115,9 @@ def main():
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
 
-      frame_path = os.path.join(dataset_path, f"{frame:04d}")
-
-      if not os.path.exists(frame_path):
-        os.makedirs(frame_path)
-      else:
-        continue
-      
+        
       flows = []
       masks = []
-
-      timesteps = []
       for anchor in reversed(range(args.anchor)):
         
         I0_index = i - anchor
@@ -171,26 +141,15 @@ def main():
         
         flows.append(flow)
         masks.append(mask)
-        timesteps.append(timestep)
+             
       
-      # I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
-      
-      # save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
-      # save I0 I1 flows and masks also timestamp as npy
-      np.save(os.path.join(frame_path, f"I0.npy"), I0.squeeze(0).cpu().numpy())
-      np.save(os.path.join(frame_path, f"I1.npy"), I1.squeeze(0).cpu().numpy())
-      flows = torch.stack(flows, dim=0)
-      masks = torch.stack(masks, dim=0)
+      flows = torch.stack(flows, dim=1)  # Shape: [1, K, 4, H, W]
+      masks = torch.stack(masks, dim=1)  # Shape: [1, K, H, W]
       # print(f"Flows shape: {flows.shape}, Masks shape: {masks.shape}")
-      np.save(os.path.join(frame_path, f"flows.npy"), flows.squeeze(1).cpu().detach().numpy())
-      np.save(os.path.join(frame_path, f"masks.npy"), masks.squeeze(1).squeeze(1).cpu().detach().numpy())
+      masks = masks.squeeze(2)  # Shape: [1, K, 1, H, W]
+      I_output, _, _, _, _= fusion(I0, I1, flows, masks)
       
-      I_gt = read_image(os.path.join(gt_path, f"{frame}.png"), matched_extension)
-      I_gt = torch.from_numpy(np.transpose(I_gt.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
-      np.save(os.path.join(frame_path, f"I_gt.npy"), I_gt.squeeze(0).cpu().numpy())
-      # Save the timestep as a npy
-      np.save(os.path.join(frame_path, f"timestep.npy"), np.array(timesteps).astype(np.float32))
-
+      save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
 
       
       

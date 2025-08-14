@@ -26,4 +26,4 @@ def warp(tenInput, tenFlow):
     g = (backwarp_tenGrid[k] + tenFlow).permute(0, 2, 3, 1)
 
     padding_mode = 'zeros' if device.type == 'mps' else 'border'
-    return torch.nn.functional.grid_sample(input=tenInput, grid=g, mode='bilinear', padding_mode=padding_mode, align_corners=True)
+    return torch.nn.functional.grid_sample(input=tenInput, grid=g, mode='bilinear', padding_mode=padding_mode, align_corners=False)
