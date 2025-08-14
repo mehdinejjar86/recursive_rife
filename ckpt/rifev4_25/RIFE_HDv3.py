@@ -85,4 +85,9 @@ class Model:
         flow, mask, merged = self.flownet(imgs, timestep, scale_list)
         return flow[-1], mask[-1]
     
+    def warp(self, img0, img1, flow, mask):
+        imgs = torch.cat((img0, img1), 1)
+        merged = self.flownet.forward_warp(imgs, flow, mask)
+        return merged
+    
 

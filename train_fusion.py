@@ -54,7 +54,7 @@ criterion_ssim = lambda x, y: 1 - ssim(x, y, size_average=True)
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=3)
 
-num_epochs = 20
+num_epochs = 30
 
 timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 save_dir = os.path.join("train", timestamp)
@@ -91,13 +91,12 @@ for epoch in range(num_epochs):
         mse_loss = F.mse_loss(out, I_gt.squeeze(1))
         
         # ⭐️ NEW: Calculate PSNR and its inverse for loss ⭐️
-        psnr_score = psnr_func(out, I_gt.squeeze(1))
-        psnr_loss = 1.0 / psnr_score if psnr_score > 0 else 1.0
+        psnr_score = psnr_func(out_resized, I_gt_resized)
+        psnr_loss = - psnr_score if psnr_score > 0 else 1.0
         
         # ⭐️ NEW: Adjust alpha and add psnr_loss to the combined loss ⭐️
         alpha = 100
-        beta = 10
-        total_loss = ssim_loss + (alpha) * mse_loss + psnr_loss * beta
+        total_loss = ssim_loss * alpha + mse_loss + psnr_loss
         
         total_train_loss += total_loss.item()
         total_train_ssim_score += ssim_score.item()
@@ -135,10 +134,10 @@ for epoch in range(num_epochs):
             ssim_loss = 1 - ssim_score
             mse_loss = F.mse_loss(out, I_gt.squeeze(1))
             
-            psnr_score = psnr_func(out, I_gt.squeeze(1))
-            psnr_loss = 1.0 / psnr_score if psnr_score > 0 else 1.0
-
-            total_loss = ssim_loss + (alpha) * mse_loss + psnr_loss * beta
+            psnr_score = psnr_func(out_resized, I_gt_resized)
+            psnr_loss = - psnr_score if psnr_score > 0 else 1.0
+            
+            total_loss = ssim_loss * alpha + mse_loss + psnr_loss
             
             total_val_loss += total_loss.item()
             total_val_ssim_score += ssim_score.item()

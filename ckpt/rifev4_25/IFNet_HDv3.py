@@ -197,6 +197,15 @@ class IFNet(nn.Module):
         print(f"mask shape: {mask.shape}, warped_img0 shape: {warped_img0.shape}, warped_img1 shape: {warped_img1.shape}")
         
         return (warped_img0 * mask + warped_img1 * (1 - mask))
+    
+    def forward_warp(self, x, flow, mask):
+        channel = x.shape[1] // 2
+        img0 = x[:, :channel]
+        img1 = x[:, channel:]
+        warped_img0 = warp(img0, flow[:, :2])
+        warped_img1 = warp(img1, flow[:, 2:4])
+        merged = (warped_img0 * mask + warped_img1 * (1 - mask))
+        return merged
 
 
     def forward_recusrive(self, x, timestep=0.5, scale_list=[8, 4, 2, 1], training=False, fastmode=True, ensemble=False, prev_flows=[], prev_masks=[]):
