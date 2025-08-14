@@ -151,7 +151,7 @@ for epoch in range(num_epochs):
 
     scheduler.step(avg_val_loss)
     current_lr = optimizer.param_groups[0]['lr']
-    print(f"Epoch [{epoch + 1}/{num_epochs}], LR: {current_lr:.6f}, Train Loss: {avg_train_loss:.4f}, Train MSE: {avg_train_mse:.4f}, Train SSIM: {avg_train_ssim:.4f}, Train PSNR: {avg_train_psnr:.4f}, Val Loss: {avg_val_loss:.4f}, Val MSE: {avg_val_mse:.4f}, Val SSIM: {avg_val_ssim:.4f}, Val PSNR: {avg_val_psnr:.4f}")
+    print(f"Epoch [{epoch + 1}/{num_epochs}], LR: {current_lr:.6f}, Train Loss: {avg_train_loss:.8f}, Train MSE: {avg_train_mse:.8f}, Train SSIM: {avg_train_ssim:.8f}, Train PSNR: {avg_train_psnr:.8f}, Val Loss: {avg_val_loss:.8f}, Val MSE: {avg_val_mse:.8f}, Val SSIM: {avg_val_ssim:.8f}, Val PSNR: {avg_val_psnr:.8f}")
 
     with open(metrics_file_path, 'a', newline='') as csvfile:
         writer = csv.writer(csvfile)
