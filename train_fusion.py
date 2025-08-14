@@ -15,6 +15,25 @@ import csv
 from sklearn.model_selection import train_test_split
 from math import log10
 
+# --- PSNR function ---
+def psnr_func(y_pred, y_true, data_range=1.0):
+    """
+    Calculates the PSNR between two images.
+    
+    Args:
+        y_pred (torch.Tensor): The predicted image.
+        y_true (torch.Tensor): The ground truth image.
+        data_range (float): The dynamic range of the image pixel values.
+    
+    Returns:
+        torch.Tensor: The PSNR value.
+    """
+    mse = F.mse_loss(y_pred, y_true)
+    if mse == 0:
+        return torch.tensor(float('inf'))
+    psnr = 10 * log10(data_range**2 / mse.item())
+    return torch.tensor(psnr)
+
 SSIM_TARGET_SIZE = (256, 256)
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu")
 if device.type == 'mps':
@@ -32,8 +51,6 @@ val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 # Assuming the fusion model is saved as fusion.py in the same directory
 model = PixelFlowFusionNetwork(img_channels=3, num_candidates=4).to(device)
 
-# The SSIM loss is defined as 1 - SSIM score
-criterion_ssim = lambda x, y: 1 - ssim(x, y, size_average=True)
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=3)
 
@@ -49,13 +66,14 @@ metrics_file_path = os.path.join(save_dir, "metrics.csv")
 
 with open(metrics_file_path, 'w', newline='') as csvfile:
     writer = csv.writer(csvfile)
-    writer.writerow(['Epoch', 'LR', 'Train_Loss', 'Train_SSIM_Score', 'Train_MSE_Loss', 'Val_Loss', 'Val_SSIM_Score', 'Val_MSE_Loss'])
+    writer.writerow(['Epoch', 'LR', 'Train_Loss', 'Train_MSE', 'Train_SSIM', 'Train_PSNR', 'Val_Loss', 'Val_MSE', 'Val_SSIM', 'Val_PSNR'])
 
 for epoch in range(num_epochs):
     model.train()
     total_train_loss = 0
-    total_train_ssim_score = 0
-    total_train_mse_loss = 0
+    total_train_mse = 0
+    total_train_ssim = 0
+    total_train_psnr = 0
     
     loop = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs} [Train]", ncols=150, position=0)
     for i, (I0, I1, flows, masks, timestep, I_gt) in enumerate(loop):
@@ -64,34 +82,39 @@ for epoch in range(num_epochs):
         )
         optimizer.zero_grad()
         out = model(I0, I1, flows, masks, timestep)
+        I_gt = I_gt.squeeze(1) 
 
         out_resized = F.interpolate(out, size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
-        I_gt_resized = F.interpolate(I_gt.squeeze(1), size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
+        I_gt_resized = F.interpolate(I_gt, size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
 
+        # --- Loss Calculation (only MSE) ---
+        mse_loss = F.mse_loss(out, I_gt)
+        total_loss = mse_loss
+        
+        # --- Metrics Calculation (not part of the loss) ---
         ssim_score = ssim(out_resized, I_gt_resized, size_average=True)
-        ssim_loss = 1 - ssim_score
-        mse_loss = F.mse_loss(out_resized, I_gt_resized)
-        
-        total_loss = ssim_loss + mse_loss
-        
+        psnr_score = psnr_func(out_resized, I_gt_resized)
+
         total_train_loss += total_loss.item()
-        total_train_ssim_score += ssim_score.item()
-        total_train_mse_loss += mse_loss.item()
+        total_train_mse += mse_loss.item()
+        total_train_ssim += ssim_score.item()
+        total_train_psnr += psnr_score.item()
         
         total_loss.backward()
         optimizer.step()
 
-        # Correctly format the output to show 6 digits after the decimal
-        loop.set_postfix_str(f'loss={total_loss.item():.6f}, ssim={ssim_score.item():.6f}, mse={mse_loss.item():.6f}')
+        loop.set_postfix_str(f'loss={total_loss.item():.6f}, mse={mse_loss.item():.6f}, ssim={ssim_score.item():.6f}, psnr={psnr_score.item():.6f}')
         
     avg_train_loss = total_train_loss / len(train_dataloader)
-    avg_train_ssim_score = total_train_ssim_score / len(train_dataloader)
-    avg_train_mse_loss = total_train_mse_loss / len(train_dataloader)
+    avg_train_mse = total_train_mse / len(train_dataloader)
+    avg_train_ssim = total_train_ssim / len(train_dataloader)
+    avg_train_psnr = total_train_psnr / len(train_dataloader)
 
     model.eval()
     total_val_loss = 0
-    total_val_ssim_score = 0
-    total_val_mse_loss = 0
+    total_val_mse = 0
+    total_val_ssim = 0
+    total_val_psnr = 0
 
     with torch.no_grad():
         val_loop = tqdm(val_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs} [Val]", ncols=150, position=1)
@@ -101,33 +124,38 @@ for epoch in range(num_epochs):
             )
 
             out = model(I0, I1, flows, masks, timestep)
-            out_resized = F.interpolate(out, size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
-            I_gt_resized = F.interpolate(I_gt.squeeze(1), size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
-            
-            ssim_score = ssim(out_resized, I_gt_resized, size_average=True)
-            ssim_loss = 1 - ssim_score
-            mse_loss = F.mse_loss(out_resized, I_gt_resized)
+            I_gt = I_gt.squeeze(1)
 
-            total_loss = ssim_loss + mse_loss
+            out_resized = F.interpolate(out, size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
+            I_gt_resized = F.interpolate(I_gt, size=SSIM_TARGET_SIZE, mode='bilinear', align_corners=False)
+            
+            # --- Loss Calculation (only MSE) ---
+            mse_loss = F.mse_loss(out, I_gt)
+            total_loss = mse_loss
+            
+            # --- Metrics Calculation (not part of the loss) ---
+            ssim_score = ssim(out_resized, I_gt_resized, size_average=True)
+            psnr_score = psnr_func(out_resized, I_gt_resized)
             
             total_val_loss += total_loss.item()
-            total_val_ssim_score += ssim_score.item()
-            total_val_mse_loss += mse_loss.item()
+            total_val_mse += mse_loss.item()
+            total_val_ssim += ssim_score.item()
+            total_val_psnr += psnr_score.item()
             
-            # Correctly format the output to show 6 digits after the decimal
-            val_loop.set_postfix_str(f'loss={total_loss.item():.6f}, ssim={ssim_score.item():.6f}, mse={mse_loss.item():.6f}')
+            val_loop.set_postfix_str(f'loss={total_loss.item():.6f}, mse={mse_loss.item():.6f}, ssim={ssim_score.item():.6f}, psnr={psnr_score.item():.6f}')
 
     avg_val_loss = total_val_loss / len(val_dataloader)
-    avg_val_ssim_score = total_val_ssim_score / len(val_dataloader)
-    avg_val_mse_loss = total_val_mse_loss / len(val_dataloader)
+    avg_val_mse = total_val_mse / len(val_dataloader)
+    avg_val_ssim = total_val_ssim / len(val_dataloader)
+    avg_val_psnr = total_val_psnr / len(val_dataloader)
 
     scheduler.step(avg_val_loss)
     current_lr = optimizer.param_groups[0]['lr']
-    print(f"Epoch [{epoch + 1}/{num_epochs}], LR: {current_lr:.6f}, Train Loss: {avg_train_loss:.4f}, Train SSIM: {avg_train_ssim_score:.4f}, Train MSE: {avg_train_mse_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val SSIM: {avg_val_ssim_score:.4f}, Val MSE: {avg_val_mse_loss:.4f}")
+    print(f"Epoch [{epoch + 1}/{num_epochs}], LR: {current_lr:.6f}, Train Loss: {avg_train_loss:.4f}, Train MSE: {avg_train_mse:.4f}, Train SSIM: {avg_train_ssim:.4f}, Train PSNR: {avg_train_psnr:.4f}, Val Loss: {avg_val_loss:.4f}, Val MSE: {avg_val_mse:.4f}, Val SSIM: {avg_val_ssim:.4f}, Val PSNR: {avg_val_psnr:.4f}")
 
     with open(metrics_file_path, 'a', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow([epoch + 1, current_lr, avg_train_loss, avg_train_ssim_score, avg_train_mse_loss, avg_val_loss, avg_val_ssim_score, avg_val_mse_loss])
+        writer.writerow([epoch + 1, current_lr, avg_train_loss, avg_train_mse, avg_train_ssim, avg_train_psnr, avg_val_loss, avg_val_mse, avg_val_ssim, avg_val_psnr])
 
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
