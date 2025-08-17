@@ -2,10 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from tqdm import tqdm
@@ -22,38 +19,236 @@ from fusion_dataset import create_multi_dataloader
 from fusion_model import FusionLoss, create_fusion_model
 
 
-def setup_distributed():
-    """Initialize distributed training if launched with torchrun"""
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
+class ModelParallelWrapper(nn.Module):
+    """
+    Wrapper to enable model parallelism by splitting computation across GPUs
+    This allows processing larger images by pooling GPU memory
+    """
+    
+    def __init__(self, base_model, num_gpus=None, split_strategy='spatial'):
+        super().__init__()
         
-        # Initialize process group
-        dist.init_process_group(backend='nccl', init_method='env://')
+        self.num_gpus = num_gpus or torch.cuda.device_count()
+        self.split_strategy = split_strategy
         
-        # Set device for this process
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f'cuda:{local_rank}')
-        
-        print(f"[Rank {rank}/{world_size}] Initialized process on GPU {local_rank}")
-        return device, rank, world_size, local_rank, True
-    else:
-        # Single GPU/CPU mode
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = torch.device("mps")
+        if self.num_gpus <= 1:
+            # Single GPU - no parallelism needed
+            self.model = base_model
+            self.parallel_mode = False
         else:
-            device = torch.device("cpu")
-        print(f"Running in single-device mode on {device}")
-        return device, 0, 1, 0, False
-
-
-def cleanup_distributed():
-    """Clean up distributed training"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
+            # Multiple GPUs - enable parallelism
+            self.models = nn.ModuleList()
+            for i in range(self.num_gpus):
+                # Create a model copy on each GPU
+                model_copy = create_fusion_model(
+                    num_anchors=base_model.num_anchors,
+                    base_channels=base_model.base_channels
+                )
+                model_copy = model_copy.cuda(i)
+                self.models.append(model_copy)
+            self.parallel_mode = True
+            
+            # Share parameters across GPUs (they process different parts of same batch)
+            if self.num_gpus > 1:
+                # Sync parameters from GPU 0 to all others
+                for i in range(1, self.num_gpus):
+                    for param_main, param_copy in zip(
+                        self.models[0].parameters(), 
+                        self.models[i].parameters()
+                    ):
+                        param_copy.data = param_main.data
+            
+            print(f"Model Parallel: Using {self.num_gpus} GPUs with {split_strategy} strategy")
+    
+    def forward(self, I0_all, I1_all, flows_all, masks_all, timesteps):
+        """Forward pass with optional model parallelism"""
+        
+        if not self.parallel_mode:
+            # Single GPU path
+            return self.model(I0_all, I1_all, flows_all, masks_all, timesteps)
+        
+        B, A, C, H, W = I0_all.shape
+        
+        if self.split_strategy == 'spatial':
+            # Split images spatially across GPUs
+            return self._forward_spatial_parallel(
+                I0_all, I1_all, flows_all, masks_all, timesteps
+            )
+        elif self.split_strategy == 'anchor':
+            # Split anchors across GPUs
+            return self._forward_anchor_parallel(
+                I0_all, I1_all, flows_all, masks_all, timesteps
+            )
+        else:
+            # Default to batch splitting
+            return self._forward_batch_parallel(
+                I0_all, I1_all, flows_all, masks_all, timesteps
+            )
+    
+    def _forward_spatial_parallel(self, I0_all, I1_all, flows_all, masks_all, timesteps):
+        """Split images spatially (by height) across GPUs"""
+        B, A, C, H, W = I0_all.shape
+        
+        # Calculate split size with overlap
+        overlap = 32
+        base_strip_height = H // self.num_gpus
+        
+        outputs = []
+        aux_outputs_list = []
+        
+        for gpu_id in range(self.num_gpus):
+            # Calculate strip boundaries with overlap
+            start_h = max(0, gpu_id * base_strip_height - overlap // 2)
+            end_h = min(H, (gpu_id + 1) * base_strip_height + overlap // 2)
+            
+            # Extract strip and move to appropriate GPU
+            I0_strip = I0_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+            I1_strip = I1_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+            flows_strip = flows_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+            masks_strip = masks_all[:, :, start_h:end_h, :].cuda(gpu_id)
+            timesteps_gpu = timesteps.cuda(gpu_id)
+            
+            # Process strip on its GPU
+            with torch.cuda.device(gpu_id):
+                output_strip, aux_strip = self.models[gpu_id](
+                    I0_strip, I1_strip, flows_strip, masks_strip, timesteps_gpu
+                )
+            
+            outputs.append(output_strip)
+            aux_outputs_list.append(aux_strip)
+        
+        # Merge outputs (blend overlapping regions)
+        merged_output = self._merge_spatial_outputs(outputs, H, overlap, base_strip_height)
+        
+        # Merge auxiliary outputs (simplified - just use first GPU's aux outputs)
+        aux_outputs = aux_outputs_list[0]
+        
+        return merged_output, aux_outputs
+    
+    def _forward_anchor_parallel(self, I0_all, I1_all, flows_all, masks_all, timesteps):
+        """Split anchors across GPUs"""
+        B, A, C, H, W = I0_all.shape
+        anchors_per_gpu = A // self.num_gpus + (1 if A % self.num_gpus else 0)
+        
+        outputs = []
+        aux_outputs_list = []
+        
+        for gpu_id in range(self.num_gpus):
+            start_a = gpu_id * anchors_per_gpu
+            end_a = min(start_a + anchors_per_gpu, A)
+            
+            if start_a >= A:
+                break
+            
+            # Extract anchors for this GPU
+            I0_gpu = I0_all[:, start_a:end_a].cuda(gpu_id)
+            I1_gpu = I1_all[:, start_a:end_a].cuda(gpu_id)
+            flows_gpu = flows_all[:, start_a:end_a].cuda(gpu_id)
+            masks_gpu = masks_all[:, start_a:end_a].cuda(gpu_id)
+            timesteps_gpu = timesteps[:, start_a:end_a].cuda(gpu_id)
+            
+            # Process on GPU
+            with torch.cuda.device(gpu_id):
+                output_gpu, aux_gpu = self.models[gpu_id](
+                    I0_gpu, I1_gpu, flows_gpu, masks_gpu, timesteps_gpu
+                )
+            
+            outputs.append(output_gpu.cuda(0))  # Move to GPU 0 for merging
+            aux_outputs_list.append(aux_gpu)
+        
+        # Average outputs from different anchors
+        merged_output = torch.stack(outputs, dim=0).mean(dim=0)
+        aux_outputs = aux_outputs_list[0]
+        
+        return merged_output, aux_outputs
+    
+    def _forward_batch_parallel(self, I0_all, I1_all, flows_all, masks_all, timesteps):
+        """Split batch across GPUs"""
+        B = I0_all.shape[0]
+        samples_per_gpu = B // self.num_gpus + (1 if B % self.num_gpus else 0)
+        
+        outputs = []
+        aux_outputs_list = []
+        
+        for gpu_id in range(self.num_gpus):
+            start_b = gpu_id * samples_per_gpu
+            end_b = min(start_b + samples_per_gpu, B)
+            
+            if start_b >= B:
+                break
+            
+            # Extract batch for this GPU
+            I0_gpu = I0_all[start_b:end_b].cuda(gpu_id)
+            I1_gpu = I1_all[start_b:end_b].cuda(gpu_id)
+            flows_gpu = flows_all[start_b:end_b].cuda(gpu_id)
+            masks_gpu = masks_all[start_b:end_b].cuda(gpu_id)
+            timesteps_gpu = timesteps[start_b:end_b].cuda(gpu_id)
+            
+            # Process on GPU
+            with torch.cuda.device(gpu_id):
+                output_gpu, aux_gpu = self.models[gpu_id](
+                    I0_gpu, I1_gpu, flows_gpu, masks_gpu, timesteps_gpu
+                )
+            
+            outputs.append(output_gpu.cuda(0))  # Move to GPU 0 for concatenation
+            aux_outputs_list.append(aux_gpu)
+        
+        # Concatenate outputs
+        merged_output = torch.cat(outputs, dim=0)
+        
+        # Merge auxiliary outputs
+        aux_outputs = {}
+        for key in aux_outputs_list[0].keys():
+            if isinstance(aux_outputs_list[0][key], list):
+                aux_outputs[key] = aux_outputs_list[0][key]
+            else:
+                aux_values = [aux[key].cuda(0) for aux in aux_outputs_list]
+                aux_outputs[key] = torch.cat(aux_values, dim=0)
+        
+        return merged_output, aux_outputs
+    
+    def _merge_spatial_outputs(self, outputs, full_height, overlap, base_strip_height):
+        """Merge spatially split outputs with blending"""
+        device = outputs[0].device
+        B, C, _, W = outputs[0].shape
+        
+        # Initialize full output
+        merged = torch.zeros(B, C, full_height, W, device=device)
+        weights = torch.zeros(B, 1, full_height, W, device=device)
+        
+        for gpu_id, output in enumerate(outputs):
+            start_h = max(0, gpu_id * base_strip_height - overlap // 2)
+            end_h = min(full_height, (gpu_id + 1) * base_strip_height + overlap // 2)
+            strip_h = end_h - start_h
+            
+            # Create weight for blending (fade at edges)
+            weight = torch.ones(B, 1, strip_h, W, device=device)
+            
+            if overlap > 0:
+                # Fade in at top (except for first strip)
+                if gpu_id > 0 and overlap // 2 < strip_h:
+                    fade_size = min(overlap // 2, strip_h)
+                    fade = torch.linspace(0, 1, fade_size, device=device)
+                    weight[:, :, :fade_size, :] *= fade.view(1, 1, -1, 1)
+                
+                # Fade out at bottom (except for last strip)
+                if gpu_id < self.num_gpus - 1 and overlap // 2 < strip_h:
+                    fade_size = min(overlap // 2, strip_h)
+                    fade = torch.linspace(1, 0, fade_size, device=device)
+                    weight[:, :, -fade_size:, :] *= fade.view(1, 1, -1, 1)
+            
+            # Move output to GPU 0 for merging
+            output = output.cuda(0)
+            weight = weight.cuda(0)
+            
+            # Add weighted output
+            merged[:, :, start_h:end_h, :] += output * weight
+            weights[:, :, start_h:end_h, :] += weight
+        
+        # Normalize by weights
+        merged = merged / (weights + 1e-8)
+        
+        return merged
 
 
 class MetricsCalculator:
@@ -64,89 +259,68 @@ class MetricsCalculator:
     
     def calculate_psnr(self, pred, target):
         """Calculate PSNR between predicted and target images"""
-        # Ensure tensors are on CPU and in numpy format
         if isinstance(pred, torch.Tensor):
             pred = pred.detach().cpu().numpy()
         if isinstance(target, torch.Tensor):
             target = target.detach().cpu().numpy()
         
-        # Handle batch dimension
-        if pred.ndim == 4:  # [B, C, H, W]
-            pred = pred.transpose(0, 2, 3, 1)  # [B, H, W, C]
+        if pred.ndim == 4:
+            pred = pred.transpose(0, 2, 3, 1)
             target = target.transpose(0, 2, 3, 1)
-        elif pred.ndim == 3 and pred.shape[0] == 3:  # [C, H, W]
-            pred = pred.transpose(1, 2, 0)  # [H, W, C]
+        elif pred.ndim == 3 and pred.shape[0] == 3:
+            pred = pred.transpose(1, 2, 0)
             target = target.transpose(1, 2, 0)
         
-        # Clamp values to [0, 1]
         pred = np.clip(pred, 0, 1)
         target = np.clip(target, 0, 1)
         
-        # Calculate PSNR
-        if pred.ndim == 4:  # Batch
+        if pred.ndim == 4:
             psnr_values = []
             for i in range(pred.shape[0]):
                 psnr_val = psnr_func(target[i], pred[i], data_range=1.0)
                 psnr_values.append(psnr_val)
             return np.mean(psnr_values)
-        else:  # Single image
+        else:
             return psnr_func(target, pred, data_range=1.0)
     
     def calculate_ssim(self, pred, target):
         """Calculate SSIM between predicted and target images"""
-        # Ensure tensors are on CPU and in numpy format
         if isinstance(pred, torch.Tensor):
             pred = pred.detach().cpu().numpy()
         if isinstance(target, torch.Tensor):
             target = target.detach().cpu().numpy()
         
-        # Handle batch dimension
-        if pred.ndim == 4:  # [B, C, H, W]
-            pred = pred.transpose(0, 2, 3, 1)  # [B, H, W, C]
+        if pred.ndim == 4:
+            pred = pred.transpose(0, 2, 3, 1)
             target = target.transpose(0, 2, 3, 1)
-        elif pred.ndim == 3 and pred.shape[0] == 3:  # [C, H, W]
-            pred = pred.transpose(1, 2, 0)  # [H, W, C]
+        elif pred.ndim == 3 and pred.shape[0] == 3:
+            pred = pred.transpose(1, 2, 0)
             target = target.transpose(1, 2, 0)
         
-        # Clamp values to [0, 1]
         pred = np.clip(pred, 0, 1)
         target = np.clip(target, 0, 1)
         
-        # Calculate SSIM
-        if pred.ndim == 4:  # Batch
+        if pred.ndim == 4:
             ssim_values = []
             for i in range(pred.shape[0]):
-                # SSIM expects channel_axis
                 ssim_val = ssim_func(target[i], pred[i], 
                                     data_range=1.0, 
                                     channel_axis=2 if pred.shape[-1] == 3 else None)
                 ssim_values.append(ssim_val)
             return np.mean(ssim_values)
-        else:  # Single image
+        else:
             return ssim_func(target, pred, 
                            data_range=1.0,
                            channel_axis=2 if pred.shape[-1] == 3 else None)
     
     def resize_for_metrics(self, tensor, size=None):
-        """
-        Resize tensor to specified size for metric calculation
-        
-        Args:
-            tensor: Input tensor to resize
-            size: Target size (H, W). If None, uses self.eval_size
-        
-        Returns:
-            Resized tensor
-        """
-        # Use instance's eval_size if no size is provided
+        """Resize tensor to specified size for metric calculation"""
         if size is None:
             size = self.eval_size
-            
-        # No resizing needed if already the right size
+        
         if tensor.shape[-2:] == size:
             return tensor
         
-        # Use bilinear interpolation for resizing
         resized = torch.nn.functional.interpolate(
             tensor if tensor.dim() == 4 else tensor.unsqueeze(0),
             size=size,
@@ -157,45 +331,28 @@ class MetricsCalculator:
         return resized if tensor.dim() == 4 else resized.squeeze(0)
 
 
-class DistributedFusionTrainer:
-    """Distributed Trainer for Multi-Anchor Fusion Model"""
+class ParallelFusionTrainer:
+    """Trainer with Model Parallelism for Large Images"""
     
     def __init__(self, config):
         self.config = config
+        self.device = self._setup_device()
         
-        # Setup distributed training
-        self.device, self.rank, self.world_size, self.local_rank, self.is_distributed = setup_distributed()
+        # Create directories
+        self.run_timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        self.run_name = f"{config.run_name}_{self.run_timestamp}" if hasattr(config, 'run_name') and config.run_name else self.run_timestamp
         
-        # Only rank 0 handles directories and logging
-        if self.rank == 0:
-            # Create timestamp-based run directory
-            self.run_timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-            self.run_name = f"{config.run_name}_{self.run_timestamp}" if hasattr(config, 'run_name') and config.run_name else self.run_timestamp
-            
-            self.config.checkpoint_dir = Path("runs") / self.run_name / Path(self.config.checkpoint_dir)
-            self.config.log_dir = Path("runs") / self.run_name / Path(self.config.log_dir)
-            self.config.sample_dir = Path("runs") / self.run_name / Path(self.config.sample_dir)
-            
-            self.setup_directories()
-        else:
-            self.run_timestamp = None
-            self.run_name = None
+        self.config.checkpoint_dir = Path("runs") / self.run_name / Path(self.config.checkpoint_dir)
+        self.config.log_dir = Path("runs") / self.run_name / Path(self.config.log_dir)
+        self.config.sample_dir = Path("runs") / self.run_name / Path(self.config.sample_dir)
         
-        # Synchronize before continuing
-        if self.is_distributed:
-            dist.barrier()
+        self.setup_directories()
         
-        # Create dataloader (distributed-aware)
-        self.train_loader, self.train_dataset = self._create_distributed_dataloader()
+        # Create dataloader
+        self.train_loader, self.train_dataset = self._create_dataloader()
         
-        # Create model
-        self.model = self._create_model()
-        
-        # Wrap model with DDP if distributed
-        if self.is_distributed:
-            self.model = DDP(self.model, device_ids=[self.local_rank], output_device=self.local_rank)
-            if self.rank == 0:
-                print(f"Model wrapped with DistributedDataParallel across {self.world_size} GPUs")
+        # Create model with parallelism if multiple GPUs available
+        self.model = self._create_parallel_model()
         
         # Create loss function
         self.loss_fn = FusionLoss(
@@ -209,35 +366,46 @@ class DistributedFusionTrainer:
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
         
-        # Setup metrics calculator with configurable size
+        # Setup metrics
         metric_size = tuple(config.metric_size) if hasattr(config, 'metric_size') else (256, 256)
         self.metrics_calc = MetricsCalculator(eval_size=metric_size)
         
-        # Setup logging (only rank 0)
-        if self.rank == 0:
-            self.writer = SummaryWriter(self.config.log_dir)
-        else:
-            self.writer = None
-        
+        # Setup logging
+        self.writer = SummaryWriter(self.config.log_dir)
         self.start_epoch = 0
-        
-        # Tracking variables
         self.best_psnr = 0
         self.best_ssim = 0
         self.epoch_metrics = []
-        self.path_metrics = {}
         
         # Load checkpoint if exists
         if config.resume:
             self.load_checkpoint(config.resume)
     
+    def _setup_device(self):
+        """Setup computing device"""
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            num_gpus = torch.cuda.device_count()
+            print(f"Using {num_gpus} CUDA GPU(s)")
+            for i in range(num_gpus):
+                props = torch.cuda.get_device_properties(i)
+                print(f"  GPU {i}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
+            torch.backends.cudnn.enabled = True
+            torch.backends.cudnn.benchmark = True
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device("mps")
+            print("Using Apple MPS")
+        else:
+            device = torch.device("cpu")
+            print("Using CPU")
+        return device
+    
     def setup_directories(self):
-        """Create directory structure (only rank 0)"""
+        """Create directory structure"""
         self.checkpoint_dir = Path(self.config.checkpoint_dir)
         self.log_dir = Path(self.config.log_dir)
         self.sample_dir = Path(self.config.sample_dir)
         
-        # Create all directories
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.sample_dir.mkdir(parents=True, exist_ok=True)
@@ -251,129 +419,101 @@ class DistributedFusionTrainer:
         config_dict = vars(self.config)
         config_dict['run_timestamp'] = self.run_timestamp
         config_dict['run_name'] = self.run_name
-        config_dict['world_size'] = self.world_size
+        config_dict['num_gpus'] = torch.cuda.device_count() if torch.cuda.is_available() else 0
         
         config_path = self.checkpoint_dir / 'config.json'
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=4, default=str)
-        
-        # Save command
-        command_path = self.checkpoint_dir / 'command.txt'
-        with open(command_path, 'w') as f:
-            import sys
-            f.write(' '.join(sys.argv))
     
-    def _create_distributed_dataloader(self):
-        """Create distributed-aware dataloader"""
-        # Parse gt_paths and steps
+    def _create_dataloader(self):
+        """Create training dataloader"""
         gt_paths = self.config.gt_paths
         steps = self.config.steps
         
-        # Ensure steps match paths
         if isinstance(steps, int):
             steps = [steps] * len(gt_paths)
         elif len(steps) == 1 and len(gt_paths) > 1:
             steps = steps * len(gt_paths)
-        elif len(steps) != len(gt_paths):
-            raise ValueError(f"Number of steps ({len(steps)}) must match number of paths ({len(gt_paths)})")
         
-        # Get optional parameters
         mix_strategy = getattr(self.config, 'mix_strategy', 'uniform')
         path_weights = getattr(self.config, 'path_weights', None)
         cache_flows = getattr(self.config, 'cache_flows', False)
         
-        # Adjust batch size for distributed training
-        if self.is_distributed:
-            # Each GPU gets batch_size samples
-            actual_batch_size = self.config.batch_size
-            if self.rank == 0:
-                print(f"Distributed training: each GPU processes batch_size={actual_batch_size}")
-                print(f"Effective batch size: {actual_batch_size * self.world_size}")
-        else:
-            actual_batch_size = self.config.batch_size
-        
         # Adjust num_workers for MPS
         num_workers = self.config.num_workers
         if self.device.type == 'mps' and num_workers > 0:
-            print(f"Warning: MPS device detected. Setting num_workers=0 to avoid multiprocessing issues.")
+            print("Warning: MPS device detected. Setting num_workers=0")
             num_workers = 0
         
-        # Create the dataloader (without distributed-specific args that may not be supported)
         train_dataloader, train_dataset = create_multi_dataloader(
             gt_paths=gt_paths,
             steps=steps,
             anchor=self.config.num_anchors,
             scale=self.config.scale,
             UHD=self.config.UHD,
-            batch_size=actual_batch_size,
-            shuffle=not self.is_distributed,  # Shuffle handled by DistributedSampler if distributed
-            num_workers=num_workers,  # Use adjusted num_workers
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
             model_dir=self.config.rife_model_dir,
             mix_strategy=mix_strategy,
             path_weights=path_weights,
             cache_flows=cache_flows
         )
         
-        # If distributed, wrap with DistributedSampler
-        if self.is_distributed:
-            from torch.utils.data.distributed import DistributedSampler
-            sampler = DistributedSampler(train_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
-            
-            # Recreate dataloader with sampler
-            from fusion_dataset import collate_fn
-            train_dataloader = DataLoader(
-                train_dataset,
-                batch_size=actual_batch_size,
-                sampler=sampler,
-                num_workers=num_workers,  # Use adjusted num_workers
-                collate_fn=collate_fn,
-                pin_memory=True,
-                drop_last=True  # Important for DDP
-            )
-        
-        # Print dataset statistics (only rank 0)
-        if self.rank == 0:
-            print("\nTraining Dataset Configuration:")
-            print("-" * 50)
-            if hasattr(train_dataset, 'get_path_statistics'):
-                stats = train_dataset.get_path_statistics()
-                for path, info in stats.items():
-                    print(f"Path: {path}")
-                    print(f"  Step: {info['step']}, Samples: {info['num_samples']} ({info['percentage']:.1f}%)")
-            print(f"Total training samples: {len(train_dataset)}")
-            print(f"Samples per GPU: {len(train_dataset) // self.world_size}")
-            print(f"Mix strategy: {mix_strategy}")
-            print("-" * 50)
+        print("\nDataset Configuration:")
+        print(f"Total samples: {len(train_dataset)}")
+        print(f"Batch size: {self.config.batch_size}")
+        print(f"Batches per epoch: {len(train_dataloader)}")
         
         return train_dataloader, train_dataset
     
-    def _create_model(self):
-        """Create and initialize model"""
-        model = create_fusion_model(
+    def _create_parallel_model(self):
+        """Create model with optional parallelism"""
+        base_model = create_fusion_model(
             num_anchors=self.config.num_anchors,
             base_channels=self.config.base_channels
-        ).to(self.device)
+        )
         
-        if self.rank == 0:
-            print(f"Model created with {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters")
+        # Check if we should use model parallelism
+        use_parallel = getattr(self.config, 'model_parallel', False)
+        parallel_strategy = getattr(self.config, 'parallel_strategy', 'spatial')
+        
+        if use_parallel and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            print(f"\nEnabling Model Parallelism with {parallel_strategy} strategy")
+            model = ModelParallelWrapper(
+                base_model,
+                num_gpus=torch.cuda.device_count(),
+                split_strategy=parallel_strategy
+            )
+        else:
+            model = base_model.to(self.device)
+            print(f"\nUsing standard model on {self.device}")
+        
+        total_params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
+        print(f"Model parameters: {total_params:,}")
         
         return model
     
     def _create_optimizer(self):
         """Create optimizer"""
-        # Use the base model parameters if wrapped with DDP
-        model_params = self.model.module.parameters() if hasattr(self.model, 'module') else self.model.parameters()
+        if hasattr(self.model, 'models'):
+            # Model parallel - optimize all model copies
+            params = []
+            for model in self.model.models:
+                params.extend(model.parameters())
+        else:
+            params = self.model.parameters()
         
         if self.config.optimizer == 'adam':
             return optim.Adam(
-                model_params,
+                params,
                 lr=self.config.learning_rate,
                 betas=(0.9, 0.999),
                 weight_decay=self.config.weight_decay
             )
         elif self.config.optimizer == 'adamw':
             return optim.AdamW(
-                model_params,
+                params,
                 lr=self.config.learning_rate,
                 betas=(0.9, 0.999),
                 weight_decay=self.config.weight_decay
@@ -395,14 +535,6 @@ class DistributedFusionTrainer:
                 step_size=self.config.step_size,
                 gamma=self.config.gamma
             )
-        elif self.config.scheduler == 'plateau':
-            return optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode='min',
-                factor=0.5,
-                patience=10,
-                verbose=True
-            )
         else:
             return None
     
@@ -410,21 +542,12 @@ class DistributedFusionTrainer:
         """Train for one epoch"""
         self.model.train()
         
-        # Set epoch for distributed sampler
-        if self.is_distributed and hasattr(self.train_loader, 'sampler') and hasattr(self.train_loader.sampler, 'set_epoch'):
-            self.train_loader.sampler.set_epoch(epoch)
-        
-        # Tracking variables for the epoch
         epoch_losses = {'total': 0, 'l1': 0, 'perceptual': 0, 'consistency': 0}
         epoch_psnr = 0
         epoch_ssim = 0
         num_batches = 0
         
-        # Progress bar only on rank 0
-        if self.rank == 0:
-            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.epochs}")
-        else:
-            pbar = self.train_loader
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.epochs}")
         
         for batch_idx, batch in enumerate(pbar):
             # Move data to device
@@ -438,6 +561,10 @@ class DistributedFusionTrainer:
             # Forward pass
             output, aux_outputs = self.model(I0_all, I1_all, flows_all, masks_all, timesteps)
             
+            # Ensure output is on same device as ground truth
+            if output.device != I_gt.device:
+                output = output.to(I_gt.device)
+            
             # Compute loss
             losses = self.loss_fn(output, I_gt, aux_outputs)
             total_loss = losses['total']
@@ -448,18 +575,19 @@ class DistributedFusionTrainer:
             
             # Gradient clipping
             if self.config.grad_clip > 0:
-                base_model = self.model.module if hasattr(self.model, 'module') else self.model
-                nn.utils.clip_grad_norm_(base_model.parameters(), self.config.grad_clip)
+                if hasattr(self.model, 'models'):
+                    for model in self.model.models:
+                        nn.utils.clip_grad_norm_(model.parameters(), self.config.grad_clip)
+                else:
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
             
             self.optimizer.step()
             
-            # Calculate metrics at specified resolution
+            # Calculate metrics
             with torch.no_grad():
-                # Resize to metric size for consistent calculation
                 output_resized = self.metrics_calc.resize_for_metrics(output)
                 I_gt_resized = self.metrics_calc.resize_for_metrics(I_gt)
                 
-                # Calculate PSNR and SSIM
                 batch_psnr = self.metrics_calc.calculate_psnr(output_resized, I_gt_resized)
                 batch_ssim = self.metrics_calc.calculate_ssim(output_resized, I_gt_resized)
                 
@@ -472,147 +600,42 @@ class DistributedFusionTrainer:
             
             num_batches += 1
             
-            # Update progress bar (rank 0 only)
-            if self.rank == 0 and hasattr(pbar, 'set_postfix'):
-                pbar.set_postfix({
-                    'loss': f"{total_loss.item():.4f}",
-                    'psnr': f"{batch_psnr:.2f}",
-                    'ssim': f"{batch_ssim:.4f}",
-                    'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
-                })
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f"{total_loss.item():.4f}",
+                'psnr': f"{batch_psnr:.2f}",
+                'ssim': f"{batch_ssim:.4f}",
+                'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
+            })
+            
+            # Report GPU memory usage periodically
+            if batch_idx % 10 == 0 and torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    mem_mb = torch.cuda.memory_allocated(i) / 1024**2
+                    max_mem_mb = torch.cuda.max_memory_allocated(i) / 1024**2
+                    if mem_mb > 0:
+                        pbar.set_description(
+                            f"Epoch {epoch}/{self.config.epochs} | GPU{i}: {mem_mb:.0f}/{max_mem_mb:.0f}MB"
+                        )
         
-        # Average metrics for the epoch
+        # Average metrics
         for key in epoch_losses:
             epoch_losses[key] /= num_batches
         epoch_psnr /= num_batches
         epoch_ssim /= num_batches
         
-        # Synchronize metrics across all GPUs
-        if self.is_distributed:
-            # Convert to tensors for all_reduce
-            loss_tensor = torch.tensor([epoch_losses[key] for key in epoch_losses], device=self.device)
-            psnr_tensor = torch.tensor([epoch_psnr], device=self.device)
-            ssim_tensor = torch.tensor([epoch_ssim], device=self.device)
-            
-            # All-reduce
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(ssim_tensor, op=dist.ReduceOp.SUM)
-            
-            # Average across GPUs
-            loss_tensor /= self.world_size
-            psnr_tensor /= self.world_size
-            ssim_tensor /= self.world_size
-            
-            # Convert back to dict
-            for i, key in enumerate(epoch_losses):
-                epoch_losses[key] = loss_tensor[i].item()
-            epoch_psnr = psnr_tensor.item()
-            epoch_ssim = ssim_tensor.item()
-        
-        # Add metrics to losses dict
         epoch_losses['psnr'] = epoch_psnr
         epoch_losses['ssim'] = epoch_ssim
         
         return epoch_losses
     
-    def validate(self):
-        """Validate the model (simplified for distributed)"""
-        # For simplicity, we'll skip validation in distributed mode
-        # You can implement distributed validation similar to training
-        return None
-    
-    def log_epoch(self, epoch, train_losses, val_losses=None):
-        """Log epoch metrics to tensorboard (rank 0 only)"""
-        if self.rank != 0:
-            return
-        
-        # Log training metrics
-        for name, value in train_losses.items():
-            self.writer.add_scalar(f'train/{name}', value, epoch)
-        
-        # Log validation metrics if available
-        if val_losses:
-            for name, value in val_losses.items():
-                self.writer.add_scalar(f'val/{name}', value, epoch)
-        
-        # Log learning rate
-        current_lr = self.optimizer.param_groups[0]['lr']
-        self.writer.add_scalar('learning_rate', current_lr, epoch)
-        
-        # Store metrics for later analysis
-        metrics_entry = {
-            'epoch': epoch,
-            'train': train_losses,
-            'val': val_losses if val_losses else None,
-            'lr': current_lr
-        }
-        self.epoch_metrics.append(metrics_entry)
-        
-        # Save metrics to JSON
-        metrics_path = self.checkpoint_dir / 'metrics.json'
-        with open(metrics_path, 'w') as f:
-            json.dump(self.epoch_metrics, f, indent=2, default=str)
-    
-    def save_samples(self, output, target, I0, I1, epoch):
-        """Save sample predictions (rank 0 only)"""
-        if self.rank != 0:
-            return
-        
-        # Move to CPU and denormalize if needed
-        output = output.detach().cpu().clamp(0, 1)
-        target = target.detach().cpu().clamp(0, 1)
-        I0 = I0.detach().cpu().clamp(0, 1)
-        I1 = I1.detach().cpu().clamp(0, 1)
-        
-        # Resize all to metric size for consistent visualization
-        metric_size = self.metrics_calc.eval_size
-        
-        output = self.metrics_calc.resize_for_metrics(output, metric_size)
-        target = self.metrics_calc.resize_for_metrics(target, metric_size)
-        I0 = self.metrics_calc.resize_for_metrics(I0, metric_size)
-        I1 = self.metrics_calc.resize_for_metrics(I1, metric_size)
-        
-        # Save first sample in batch
-        sample_idx = 0
-        
-        # Create grid - stack images horizontally
-        from torchvision.utils import save_image, make_grid
-        
-        # Get individual images
-        i0_img = I0[sample_idx:sample_idx+1]
-        output_img = output[sample_idx:sample_idx+1]
-        target_img = target[sample_idx:sample_idx+1]
-        i1_img = I1[sample_idx:sample_idx+1]
-        
-        # Stack them for grid
-        grid_images = torch.cat([i0_img, output_img, target_img, i1_img], dim=0)
-        
-        # Save grid to file
-        save_path = self.sample_dir / f'epoch_{epoch:04d}.png'
-        save_image(grid_images, save_path, nrow=4, normalize=False)
-        
-        # For tensorboard, use make_grid to create a proper grid
-        grid_for_tb = make_grid(grid_images, nrow=4, normalize=False)
-        self.writer.add_image('samples/prediction', grid_for_tb, epoch)
-        
-        # Calculate and display metrics for this sample
-        sample_psnr = self.metrics_calc.calculate_psnr(
-            output[sample_idx], target[sample_idx]
-        )
-        sample_ssim = self.metrics_calc.calculate_ssim(
-            output[sample_idx], target[sample_idx]
-        )
-        
-        print(f"  Sample PSNR: {sample_psnr:.2f} dB, SSIM: {sample_ssim:.4f}")
-    
     def save_checkpoint(self, epoch, is_best=False):
-        """Save model checkpoint (rank 0 only)"""
-        if self.rank != 0:
-            return
-        
-        # Get base model state dict
-        model_state = self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict()
+        """Save model checkpoint"""
+        if hasattr(self.model, 'models'):
+            # Save first model's state (they're synchronized)
+            model_state = self.model.models[0].state_dict()
+        else:
+            model_state = self.model.state_dict()
         
         checkpoint = {
             'epoch': epoch,
@@ -622,39 +645,33 @@ class DistributedFusionTrainer:
             'best_psnr': self.best_psnr,
             'best_ssim': self.best_ssim,
             'epoch_metrics': self.epoch_metrics,
-            'config': vars(self.config),
-            'run_name': self.run_name,
-            'run_timestamp': self.run_timestamp,
-            'world_size': self.world_size
+            'config': vars(self.config)
         }
         
-        # Save regular checkpoint every N epochs
         if epoch % self.config.save_interval == 0:
             checkpoint_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pth'
             torch.save(checkpoint, checkpoint_path)
             print(f"  Checkpoint saved: {checkpoint_path}")
         
-        # Save best checkpoint
         if is_best:
             best_path = self.checkpoint_dir / 'best_model.pth'
             torch.save(checkpoint, best_path)
             print(f"  Best model saved!")
         
-        # Always save latest checkpoint
         latest_path = self.checkpoint_dir / 'latest_model.pth'
         torch.save(checkpoint, latest_path)
     
     def load_checkpoint(self, checkpoint_path):
         """Load model checkpoint"""
-        # Map to current device
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % self.local_rank} if self.is_distributed else self.device
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # Load model state
-        base_model = self.model.module if hasattr(self.model, 'module') else self.model
-        base_model.load_state_dict(checkpoint['model_state_dict'])
+        if hasattr(self.model, 'models'):
+            # Load to all model copies
+            for model in self.model.models:
+                model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Load optimizer state
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         if self.scheduler and checkpoint.get('scheduler_state_dict'):
@@ -665,130 +682,86 @@ class DistributedFusionTrainer:
         self.best_ssim = checkpoint.get('best_ssim', 0)
         self.epoch_metrics = checkpoint.get('epoch_metrics', [])
         
-        if self.rank == 0:
-            print(f"Checkpoint loaded from {checkpoint_path}")
-            print(f"Resuming from epoch {self.start_epoch}")
-            print(f"Best PSNR: {self.best_psnr:.2f}, Best SSIM: {self.best_ssim:.4f}")
+        print(f"Checkpoint loaded from {checkpoint_path}")
+        print(f"Resuming from epoch {self.start_epoch}")
     
     def train(self):
         """Main training loop"""
-        if self.rank == 0:
-            print(f"\nStarting distributed training for {self.config.epochs} epochs")
-            print(f"World size: {self.world_size} GPUs")
-            print(f"Training samples per GPU: {len(self.train_dataset) // self.world_size}")
-            print(f"Batch size per GPU: {self.config.batch_size}")
-            print(f"Effective batch size: {self.config.batch_size * self.world_size}")
-            print(f"Total batches per epoch: {len(self.train_loader)}")
-            print(f"Metrics computed at: {self.metrics_calc.eval_size} resolution")
-            print("-" * 60)
+        print(f"\nStarting training for {self.config.epochs} epochs")
+        print("-" * 60)
         
-        try:
-            for epoch in range(self.start_epoch, self.config.epochs):
-                epoch_start_time = datetime.now()
-                
-                # Train
-                train_losses = self.train_epoch(epoch)
-                
-                # Validate (simplified for now)
-                val_losses = self.validate()
-                
-                # Check if best model (based on training PSNR for simplicity)
-                is_best = train_losses['psnr'] > self.best_psnr
-                if is_best:
-                    self.best_psnr = train_losses['psnr']
-                    self.best_ssim = train_losses['ssim']
-                    if self.rank == 0:
-                        print(f"  New best model! PSNR: {self.best_psnr:.2f} dB, SSIM: {self.best_ssim:.4f}")
-                
-                # Update scheduler
-                if self.scheduler:
-                    if self.config.scheduler == 'plateau' and val_losses:
-                        self.scheduler.step(val_losses['total'])
-                    else:
-                        self.scheduler.step()
-                
-                # Log epoch metrics (rank 0 only)
-                self.log_epoch(epoch, train_losses, val_losses)
-                
-                # Print epoch summary (rank 0 only)
-                if self.rank == 0:
-                    epoch_time = (datetime.now() - epoch_start_time).total_seconds()
-                    print(f"\n{'='*60}")
-                    print(f"Epoch {epoch}/{self.config.epochs} Summary (Time: {epoch_time:.1f}s)")
-                    print(f"  Train - Loss: {train_losses['total']:.4f}, PSNR: {train_losses['psnr']:.2f} dB, SSIM: {train_losses['ssim']:.4f}")
-                    if val_losses:
-                        print(f"  Val   - Loss: {val_losses['total']:.4f}, PSNR: {val_losses['psnr']:.2f} dB, SSIM: {val_losses['ssim']:.4f}")
-                    print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.6f}")
-                    print(f"  Best PSNR: {self.best_psnr:.2f} dB, Best SSIM: {self.best_ssim:.4f}")
-                
-                # Save sample predictions (rank 0 only)
-                if self.rank == 0 and epoch % self.config.sample_interval == 0:
-                    # Get a sample batch for visualization
-                    sample_batch = next(iter(self.train_loader))
-                    with torch.no_grad():
-                        I0_all = sample_batch['I0'].to(self.device)
-                        I1_all = sample_batch['I1'].to(self.device)
-                        flows_all = sample_batch['flows'].to(self.device)
-                        masks_all = sample_batch['masks'].to(self.device)
-                        timesteps = sample_batch['timesteps'].to(self.device)
-                        I_gt = sample_batch['I_gt'].to(self.device)
-                        
-                        output, _ = self.model(I0_all, I1_all, flows_all, masks_all, timesteps)
-                        self.save_samples(output, I_gt, I0_all[:, 0], I1_all[:, -1], epoch)
-                
-                # Save checkpoint (rank 0 only)
-                self.save_checkpoint(epoch, is_best)
-                
-                if self.rank == 0:
-                    print("="*60)
-                
-                # Synchronize all processes before next epoch
-                if self.is_distributed:
-                    dist.barrier()
-        
-        finally:
-            # Save final model
-            if self.rank == 0:
-                self.save_checkpoint(self.config.epochs, False)
-                if self.writer:
-                    self.writer.close()
-                
-                print("\n" + "="*60)
-                print("Training completed!")
-                print(f"Best PSNR: {self.best_psnr:.2f} dB")
-                print(f"Best SSIM: {self.best_ssim:.4f}")
-                print(f"Run directory: {self.run_name}")
-                print("="*60)
+        for epoch in range(self.start_epoch, self.config.epochs):
+            epoch_start_time = datetime.now()
             
-            # Clean up distributed training
-            cleanup_distributed()
+            # Train
+            train_losses = self.train_epoch(epoch)
+            
+            # Check if best model
+            is_best = train_losses['psnr'] > self.best_psnr
+            if is_best:
+                self.best_psnr = train_losses['psnr']
+                self.best_ssim = train_losses['ssim']
+                print(f"  New best model! PSNR: {self.best_psnr:.2f} dB")
+            
+            # Update scheduler
+            if self.scheduler:
+                self.scheduler.step()
+            
+            # Log metrics
+            for name, value in train_losses.items():
+                self.writer.add_scalar(f'train/{name}', value, epoch)
+            
+            self.writer.add_scalar('learning_rate', 
+                                  self.optimizer.param_groups[0]['lr'], epoch)
+            
+            # Print summary
+            epoch_time = (datetime.now() - epoch_start_time).total_seconds()
+            print(f"\nEpoch {epoch}/{self.config.epochs} ({epoch_time:.1f}s)")
+            print(f"  Loss: {train_losses['total']:.4f}")
+            print(f"  PSNR: {train_losses['psnr']:.2f} dB")
+            print(f"  SSIM: {train_losses['ssim']:.4f}")
+            print(f"  LR: {self.optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Save checkpoint
+            self.save_checkpoint(epoch, is_best)
+            
+            # Store metrics
+            self.epoch_metrics.append({
+                'epoch': epoch,
+                'train': train_losses,
+                'lr': self.optimizer.param_groups[0]['lr']
+            })
+            
+            # Save metrics JSON
+            with open(self.checkpoint_dir / 'metrics.json', 'w') as f:
+                json.dump(self.epoch_metrics, f, indent=2, default=str)
+        
+        self.writer.close()
+        print("\nTraining completed!")
+        print(f"Best PSNR: {self.best_psnr:.2f} dB")
+        print(f"Best SSIM: {self.best_ssim:.4f}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Multi-Anchor Fusion Model with Distributed Support')
+    parser = argparse.ArgumentParser(description='Train Fusion Model with Model Parallelism')
     
     # Dataset arguments
     parser.add_argument('--gt_paths', '--gt_path', type=str, nargs='+', required=True,
                         dest='gt_paths',
-                        help='Path(s) to ground truth images (can specify one or multiple)')
+                        help='Path(s) to ground truth images')
     parser.add_argument('--steps', '--step', type=int, nargs='+', required=True,
                         dest='steps',
-                        help='Step size(s) for sequence generation (single value or one per path)')
+                        help='Step size(s) for sequence generation')
     
     # Validation data arguments
     parser.add_argument('--val_split', type=float, default=0.1,
                         help='Validation split ratio (0.0 to disable, default: 0.1)')
-    parser.add_argument('--val_paths', type=str, nargs='+', default=None,
+    parser.add_argument('--val_paths', '--val_path', type=str, nargs='+', default=None,
+                        dest='val_paths',
                         help='Separate validation dataset paths (optional)')
-    parser.add_argument('--val_steps', type=int, nargs='+', default=None,
+    parser.add_argument('--val_steps', '--val_step', type=int, nargs='+', default=None,
+                        dest='val_steps',
                         help='Step sizes for validation paths')
-    parser.add_argument('--mix_strategy', type=str, default='uniform',
-                        choices=['uniform', 'weighted', 'sequential', 'balanced'],
-                        help='How to mix samples from different paths')
-    parser.add_argument('--path_weights', type=float, nargs='+',
-                        help='Weights for each path (for weighted strategy)')
-    parser.add_argument('--cache_flows', action='store_true',
-                        help='Cache extracted flows to speed up training')
     
     # Model arguments
     parser.add_argument('--num_anchors', type=int, default=3,
@@ -802,9 +775,16 @@ def main():
     parser.add_argument('--rife_model_dir', type=str, default='ckpt/rifev4_25',
                         help='Path to RIFE model directory')
     
+    # Parallelism arguments
+    parser.add_argument('--model_parallel', action='store_true',
+                        help='Enable model parallelism for large images')
+    parser.add_argument('--parallel_strategy', type=str, default='spatial',
+                        choices=['spatial', 'anchor', 'batch'],
+                        help='Parallelism strategy: spatial (split image), anchor (split anchors), batch')
+    
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=2,
-                        help='Batch size per GPU for training')
+                        help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
@@ -831,7 +811,7 @@ def main():
                         choices=['adam', 'adamw'],
                         help='Optimizer type')
     parser.add_argument('--scheduler', type=str, default='cosine',
-                        choices=['cosine', 'step', 'plateau', 'none'],
+                        choices=['cosine', 'step', 'none'],
                         help='Learning rate scheduler')
     parser.add_argument('--step_size', type=int, default=30,
                         help='Step size for StepLR scheduler')
@@ -840,35 +820,31 @@ def main():
     
     # Logging and saving
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
-                        help='Base directory for checkpoints')
+                        help='Directory for checkpoints')
     parser.add_argument('--log_dir', type=str, default='logs',
-                        help='Base directory for tensorboard logs')
+                        help='Directory for tensorboard logs')
     parser.add_argument('--sample_dir', type=str, default='samples',
-                        help='Base directory for sample predictions')
+                        help='Directory for sample predictions')
     parser.add_argument('--run_name', type=str, default=None,
                         help='Optional name for this training run')
-    parser.add_argument('--sample_interval', type=int, default=5,
-                        help='Sample saving interval (epochs)')
     parser.add_argument('--save_interval', type=int, default=10,
-                        help='Checkpoint saving interval (epochs)')
-    parser.add_argument('--val_interval', type=int, default=1,
-                        help='Validation interval (epochs)')
+                        help='Checkpoint saving interval')
     
     # Metrics
     parser.add_argument('--metric_size', type=int, nargs=2, default=[256, 256],
-                        help='Size for computing metrics (H W)')
+                        help='Size for computing metrics')
     
     # Other arguments
     parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers per GPU')
+                        help='Number of data loading workers')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
-    
-    # Distributed training arguments
-    parser.add_argument('--local_rank', type=int, default=-1,
-                        help='Local rank for distributed training (set automatically by torchrun)')
+    parser.add_argument('--mix_strategy', type=str, default='uniform',
+                        help='Dataset mixing strategy')
+    parser.add_argument('--cache_flows', action='store_true',
+                        help='Cache extracted flows')
     
     args = parser.parse_args()
     
@@ -879,7 +855,7 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     
     # Create trainer and start training
-    trainer = DistributedFusionTrainer(args)
+    trainer = ParallelFusionTrainer(args)
     trainer.train()
 
 
