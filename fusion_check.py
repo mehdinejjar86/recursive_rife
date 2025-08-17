@@ -101,7 +101,7 @@ def test_different_sizes():
     model = create_fusion_model(num_anchors=3, base_channels=32).to(device)
     model.eval()
     
-    test_sizes = [(2048, 2048)]
+    test_sizes = [(64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024), (2048, 2048)]
     batch_size = 1
     num_anchors = 3
     
