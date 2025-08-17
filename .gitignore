@@ -17,5 +17,5 @@ metrics_results*
 *confocal*
 *membrane*
 *xx*
-*dataset*
 train/*
+runs/*

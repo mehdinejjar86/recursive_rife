@@ -128,7 +128,9 @@ def main():
   pairs = trange(len(videogen) - 1)
   pairs.set_description("Processing frames")
   
-  dataset_path = "dataset_fusion"
+  STEP = 4
+
+  dataset_path = f"dataset_fusion/E30_c1_STEP{STEP}"
   gt_path = "E30_c1"
 
   for i in pairs:
@@ -137,17 +139,12 @@ def main():
     
     for frame in range(ground_truth[i] +1, ground_truth[i + 1]):
 
-      frame_path = os.path.join(dataset_path, f"{frame:04d}")
-
-      if not os.path.exists(frame_path):
-        os.makedirs(frame_path)
-      else:
-        continue
+      
       
       flows = []
       masks = []
-
       timesteps = []
+      flag_time = False
       for anchor in reversed(range(args.anchor)):
         
         I0_index = i - anchor
@@ -168,17 +165,20 @@ def main():
         I1 = pad_image(I1, padding=padding)
         
         flow, mask = model.flow_extractor(I0, I1, timestep, args.scale)
-        
+
         flows.append(flow)
         masks.append(mask)
         timesteps.append(timestep)
-      
-      # I_output = model.inference_global(I0, I1, flows, masks, flows_weights, timestep, args.scale)
-      
-      # save_image(I_output, args.output, frame, matched_extension, h, w, dtype=frame_dtype, max_val=max_val)
-      # save I0 I1 flows and masks also timestamp as npy
-      np.save(os.path.join(frame_path, f"I0.npy"), I0.squeeze(0).cpu().numpy())
-      np.save(os.path.join(frame_path, f"I1.npy"), I1.squeeze(0).cpu().numpy())
+
+      frame_path = os.path.join(dataset_path, f"{frame:04d}")
+
+      if not os.path.exists(frame_path):
+        os.makedirs(frame_path)
+      else:
+        continue
+
+      np.save(os.path.join(frame_path, f"I0.npy"), I0.squeeze(0).cpu().detach().numpy())
+      np.save(os.path.join(frame_path, f"I1.npy"), I1.squeeze(0).cpu().detach().numpy())
       flows = torch.stack(flows, dim=0)
       masks = torch.stack(masks, dim=0)
       # print(f"Flows shape: {flows.shape}, Masks shape: {masks.shape}")
@@ -188,8 +188,7 @@ def main():
       I_gt = read_image(os.path.join(gt_path, f"{frame}.png"), matched_extension)
       I_gt = torch.from_numpy(np.transpose(I_gt.astype(np.int64), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / max_val
       np.save(os.path.join(frame_path, f"I_gt.npy"), I_gt.squeeze(0).cpu().numpy())
-      # Save the timestep as a npy
-      np.save(os.path.join(frame_path, f"timestep.npy"), np.array(timesteps).astype(np.float32))
+
 
 
       
