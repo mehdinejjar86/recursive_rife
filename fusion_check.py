@@ -97,7 +97,13 @@ def test_different_sizes():
     print("Testing Different Input Sizes")
     print("=" * 50)
     
-    device = torch.device('cpu')  # Use CPU for size testing
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 
+                          'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 
+                          'cpu')
+    print(f"Using device: {device}\n")
+
+    # device = torch.device('cpu')  # Use CPU for size testing
     model = create_fusion_model(num_anchors=3, base_channels=32).to(device)
     model.eval()
     
