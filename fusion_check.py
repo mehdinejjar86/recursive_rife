@@ -241,6 +241,132 @@ def test_gradient_flow_distributed():
     
     cleanup_distributed()
 
+def test_different_sizes():
+    """Test model with different input sizes"""
+    print("\n" + "=" * 50)
+    print("Testing Different Input Sizes")
+    print("=" * 50)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 
+                          'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 
+                          'cpu')
+    print(f"Using device: {device}\n")
+    
+    model = create_fusion_model(num_anchors=3, base_channels=32).to(device)
+    model.eval()
+    
+    test_sizes = [(64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024), (2048, 2048)]
+    batch_size = 1
+    num_anchors = 3
+    
+    for h, w in test_sizes:
+        print(f"\nTesting {h}x{w}...")
+        
+        I0_all = torch.randn(batch_size, num_anchors, 3, h, w).to(device)
+        I1_all = torch.randn(batch_size, num_anchors, 3, h, w).to(device)
+        flows_all = torch.randn(batch_size, num_anchors, 4, h, w).to(device)
+        masks_all = torch.rand(batch_size, num_anchors, h, w).to(device)
+        timesteps = torch.rand(batch_size, num_anchors).to(device)
+        
+        try:
+            with torch.no_grad():
+                output, _ = model(I0_all, I1_all, flows_all, masks_all, timesteps)
+            print(f"  ✓ Size {h}x{w} passed. Output shape: {output.shape}")
+            
+            # Report memory usage for larger sizes
+            if torch.cuda.is_available() and device.type == 'cuda' and h >= 512:
+                mem_gb = torch.cuda.memory_allocated(device) / 1024**3
+                print(f"    Memory used: {mem_gb:.2f} GB")
+                
+        except Exception as e:
+            print(f"  ❌ Size {h}x{w} failed: {e}")
+            # If we run out of memory, stop testing larger sizes
+            if "out of memory" in str(e).lower():
+                print("    Stopping size tests due to memory limitations")
+                break
+
+def test_different_sizes_distributed():
+    """Test model with different input sizes in distributed setting"""
+    device, rank, world_size, local_rank = setup_distributed()
+    
+    if rank == 0:
+        print("\n" + "=" * 50)
+        print("Testing Different Input Sizes (Distributed)")
+        print("=" * 50)
+        print(f"Running on {world_size} GPU(s)\n")
+    
+    model = create_fusion_model(num_anchors=3, base_channels=32).to(device)
+    
+    # Wrap with DDP if distributed
+    if dist.is_initialized():
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    
+    model.eval()
+    
+    test_sizes = [(64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024), (2048, 2048)]
+    batch_size = 1  # Per GPU
+    num_anchors = 3
+    
+    for h, w in test_sizes:
+        if rank == 0:
+            print(f"\nTesting {h}x{w}...")
+        
+        # Each GPU gets its own input
+        torch.manual_seed(42 + rank)
+        I0_all = torch.randn(batch_size, num_anchors, 3, h, w).to(device)
+        I1_all = torch.randn(batch_size, num_anchors, 3, h, w).to(device)
+        flows_all = torch.randn(batch_size, num_anchors, 4, h, w).to(device)
+        masks_all = torch.rand(batch_size, num_anchors, h, w).to(device)
+        timesteps = torch.rand(batch_size, num_anchors).to(device)
+        
+        try:
+            with torch.no_grad():
+                output, _ = model(I0_all, I1_all, flows_all, masks_all, timesteps)
+            
+            # Gather success status from all ranks
+            success = torch.tensor([1.0], device=device)
+            if dist.is_initialized():
+                dist.all_reduce(success, op=dist.ReduceOp.MIN)
+            
+            if success.item() > 0:
+                if rank == 0:
+                    print(f"  ✓ Size {h}x{w} passed. Output shape per GPU: {output.shape}")
+                
+                # Report memory usage
+                if torch.cuda.is_available() and device.type == 'cuda' and h >= 512:
+                    mem_gb = torch.cuda.memory_allocated(device) / 1024**3
+                    max_mem_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+                    
+                    # Gather max memory from all GPUs
+                    if dist.is_initialized():
+                        mem_tensor = torch.tensor([mem_gb], device=device)
+                        max_mem_tensor = torch.tensor([max_mem_gb], device=device)
+                        dist.all_reduce(mem_tensor, op=dist.ReduceOp.MAX)
+                        dist.all_reduce(max_mem_tensor, op=dist.ReduceOp.MAX)
+                        mem_gb = mem_tensor.item()
+                        max_mem_gb = max_mem_tensor.item()
+                    
+                    if rank == 0:
+                        print(f"    Current memory: {mem_gb:.2f} GB, Peak memory: {max_mem_gb:.2f} GB")
+            
+        except Exception as e:
+            # Signal failure to other ranks
+            failure = torch.tensor([0.0], device=device)
+            if dist.is_initialized():
+                dist.all_reduce(failure, op=dist.ReduceOp.MIN)
+            
+            if rank == 0:
+                print(f"  ❌ Size {h}x{w} failed: {e}")
+                if "out of memory" in str(e).lower():
+                    print("    Stopping size tests due to memory limitations")
+            break
+        
+        # Synchronize before next size
+        if dist.is_initialized():
+            dist.barrier()
+    
+    cleanup_distributed()
+
 def main():
     """Main entry point"""
     # Check if we're in distributed mode
@@ -248,25 +374,85 @@ def main():
     
     if is_distributed:
         rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
     else:
         rank = 0
+        world_size = 1
     
-    # Run tests
+    # Run main forward pass test
     success = test_model_forward_distributed()
     
     if success:
-        # Only run additional tests from rank 0 or in single-GPU mode
-        if rank == 0 or not is_distributed:
-            # For size testing, use single GPU to save memory
-            if is_distributed:
-                cleanup_distributed()
-            
-            # Import and run original single-GPU tests if needed
-            # test_different_sizes()
+        # Run size tests
+        if is_distributed and world_size > 1:
+            # Test sizes with distributed setup
+            test_different_sizes_distributed()
+        elif rank == 0:
+            # Single GPU/CPU size test
+            test_different_sizes()
         
-        # Run distributed gradient test
+        # Run gradient flow test
         if is_distributed:
             test_gradient_flow_distributed()
+        elif rank == 0:
+            # Need to setup the model again for gradient test in single mode
+            print("\n" + "=" * 50)
+            print("Testing Gradient Flow (Single Device)")
+            print("=" * 50)
+            
+            device = torch.device('cuda' if torch.cuda.is_available() else 
+                                  'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 
+                                  'cpu')
+            model = create_fusion_model(num_anchors=3, base_channels=32).to(device)
+            model.train()
+            
+            # Small inputs for gradient testing
+            batch_size = 1
+            num_anchors = 3
+            h, w = 64, 64
+            
+            I0_all = torch.randn(batch_size, num_anchors, 3, h, w, requires_grad=True).to(device)
+            I1_all = torch.randn(batch_size, num_anchors, 3, h, w, requires_grad=True).to(device)
+            flows_all = torch.randn(batch_size, num_anchors, 4, h, w, requires_grad=True).to(device)
+            masks_all = torch.rand(batch_size, num_anchors, h, w, requires_grad=True).to(device)
+            timesteps = torch.rand(batch_size, num_anchors, requires_grad=True).to(device)
+            
+            # Forward pass
+            output, aux_outputs = model(I0_all, I1_all, flows_all, masks_all, timesteps)
+            
+            # Create dummy loss
+            target = torch.randn_like(output)
+            loss = nn.functional.mse_loss(output, target)
+            
+            print(f"Loss value: {loss.item():.4f}")
+            
+            # Backward pass
+            loss.backward()
+            
+            # Check gradients
+            print("\nGradient checks:")
+            
+            params_with_grad = sum(1 for p in model.parameters() if p.grad is not None and p.grad.abs().sum() > 0)
+            total_params = sum(1 for _ in model.parameters())
+            
+            print(f"  Parameters with gradients: {params_with_grad}/{total_params}")
+            
+            if I0_all.grad is not None:
+                print(f"  ✓ I0_all has gradients. Mean abs grad: {I0_all.grad.abs().mean().item():.6f}")
+            if flows_all.grad is not None:
+                print(f"  ✓ flows_all has gradients. Mean abs grad: {flows_all.grad.abs().mean().item():.6f}")
+            if timesteps.grad is not None:
+                print(f"  ✓ timesteps has gradients. Mean abs grad: {timesteps.grad.abs().mean().item():.6f}")
+            
+            if params_with_grad > 0:
+                print("\n✅ Gradient flow test passed!")
+            else:
+                print("\n❌ No gradients found in model parameters!")
+    
+    if rank == 0:
+        print("\n" + "=" * 50)
+        print("Testing Complete!")
+        print("=" * 50)
 
 if __name__ == "__main__":
     main()
