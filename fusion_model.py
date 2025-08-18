@@ -97,7 +97,7 @@ class ChannelAttention(nn.Module):
 
 class CrossAttentionFusion(nn.Module):
     """Cross-attention mechanism for fusing features from multiple anchors"""
-    def __init__(self, channels, num_heads=4, downsample_factor=4):
+    def __init__(self, channels, num_heads=4, downsample_factor=8):
         super().__init__()
         self.num_heads = num_heads
         self.channels = channels
