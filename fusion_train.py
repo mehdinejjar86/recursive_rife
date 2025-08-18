@@ -25,7 +25,7 @@ class ModelParallelWrapper(nn.Module):
     This allows processing larger images by pooling GPU memory
     """
     
-    def __init__(self, base_model, num_gpus=None, split_strategy='spatial'):
+    def __init__(self, base_model, downsample_factor, num_gpus=None, split_strategy='spatial'):
         super().__init__()
         
         self.num_gpus = num_gpus or torch.cuda.device_count()
@@ -42,7 +42,9 @@ class ModelParallelWrapper(nn.Module):
                 # Create a model copy on each GPU
                 model_copy = create_fusion_model(
                     num_anchors=base_model.num_anchors,
-                    base_channels=base_model.base_channels
+                    base_channels=base_model.base_channels,
+                    downsample_factor=downsample_factor
+
                 )
                 model_copy = model_copy.cuda(i)
                 self.models.append(model_copy)
@@ -471,7 +473,8 @@ class ParallelFusionTrainer:
         """Create model with optional parallelism"""
         base_model = create_fusion_model(
             num_anchors=self.config.num_anchors,
-            base_channels=self.config.base_channels
+            base_channels=self.config.base_channels,
+            downsample_factor=self.config.downsample_factor
         )
         
         # Check if we should use model parallelism
@@ -482,6 +485,7 @@ class ParallelFusionTrainer:
             print(f"\nEnabling Model Parallelism with {parallel_strategy} strategy")
             model = ModelParallelWrapper(
                 base_model,
+                downsample_factor=self.config.downsample_factor,
                 num_gpus=torch.cuda.device_count(),
                 split_strategy=parallel_strategy
             )
@@ -768,6 +772,8 @@ def main():
                         help='Number of anchor frames')
     parser.add_argument('--base_channels', type=int, default=64,
                         help='Base number of channels in model')
+    parser.add_argument('--downsample_factor', type=int, default=1,
+                        help='Downsample factor for input images')
     parser.add_argument('--scale', type=float, default=1.0,
                         help='Scale factor for processing')
     parser.add_argument('--UHD', action='store_true',

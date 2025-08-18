@@ -223,7 +223,7 @@ class MultiAnchorFusionModel(nn.Module):
     Novel multi-anchor fusion model for video frame interpolation
     Fuses information from multiple anchor pairs with different temporal distances
     """
-    def __init__(self, num_anchors=3, base_channels=64, use_deformable=False):
+    def __init__(self, num_anchors=3, base_channels=64, downsample_factor=8, use_deformable=False):
         super().__init__()
         self.num_anchors = num_anchors
         self.base_channels = base_channels
@@ -254,9 +254,9 @@ class MultiAnchorFusionModel(nn.Module):
         ])
         
         # Cross-attention fusion modules
-        self.cross_attention_low = CrossAttentionFusion(base_channels * 2)
-        self.cross_attention_mid = CrossAttentionFusion(base_channels * 4)
-        self.cross_attention_high = CrossAttentionFusion(base_channels * 8)
+        self.cross_attention_low = CrossAttentionFusion(base_channels * 2, downsample_factor=downsample_factor)
+        self.cross_attention_mid = CrossAttentionFusion(base_channels * 4, downsample_factor=downsample_factor)
+        self.cross_attention_high = CrossAttentionFusion(base_channels * 8, downsample_factor=downsample_factor)
         
         # Hierarchical fusion decoder
         self.decoder = self._make_decoder()
@@ -580,9 +580,9 @@ class FusionLoss(nn.Module):
         }
 
 
-def create_fusion_model(num_anchors=3, base_channels=64):
+def create_fusion_model(num_anchors=3, base_channels=64, downsample_factor=8):
     """Factory function to create the fusion model"""
-    return MultiAnchorFusionModel(num_anchors=num_anchors, base_channels=base_channels)
+    return MultiAnchorFusionModel(num_anchors=num_anchors, base_channels=base_channels, downsample_factor=downsample_factor)
 
 
 # Example usage
