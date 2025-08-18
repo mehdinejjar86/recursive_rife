@@ -19,3 +19,5 @@ metrics_results*
 *xx*
 train/*
 runs/*
+wandb/*
+*.ipynb_checkpoints
