@@ -710,7 +710,8 @@ class ParallelFusionTrainer:
         config_path = self.checkpoint_dir / 'config.json'
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=4, default=str)
-    
+
+
     def _create_dataloader(self):
         """Create training dataloader"""
         gt_paths = self.config.gt_paths
@@ -725,38 +726,20 @@ class ParallelFusionTrainer:
         path_weights = getattr(self.config, 'path_weights', None)
         cache_flows = getattr(self.config, 'cache_flows', False)
         
-        # Check if model parallelism is being used
-        use_parallel = getattr(self.config, 'model_parallel', False)
-        
-        # Adjust settings for model parallelism
-        if use_parallel and torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            # Force flow caching when using model parallelism
-            if not cache_flows:
-                print("Model parallelism detected - enabling flow caching automatically")
-                cache_flows = True
-            
-            # Use CPU for flow extraction to avoid GPU conflicts
-            device_for_flows = 'cpu'
-            
-            # Set workers to 0 to avoid multiprocessing issues
+        # Adjust num_workers for MPS or when using model parallelism
+        num_workers = self.config.num_workers
+        if self.device.type == 'mps' and num_workers > 0:
+            print("Warning: MPS device detected. Setting num_workers=0")
             num_workers = 0
-            print(f"Model parallelism: Using CPU for flow extraction, num_workers=0")
-        else:
-            # Normal operation
-            num_workers = self.config.num_workers
-            device_for_flows = getattr(self.config, 'device_for_flows', 'cpu')
-            
-            # Adjust num_workers for MPS
-            if self.device.type == 'mps' and num_workers > 0:
-                print("Warning: MPS device detected. Setting num_workers=0")
+        
+        # When using model parallelism with multiple GPUs, reduce workers to avoid device conflicts
+        use_parallel = getattr(self.config, 'model_parallel', False)
+        if use_parallel and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            if num_workers > 0:
+                print(f"Warning: Model parallelism detected. Reducing num_workers from {num_workers} to 0 to avoid device conflicts")
                 num_workers = 0
         
-        # Determine if we should precompute flows
-        precompute_flows = cache_flows and not getattr(self.config, 'no_precompute_flows', False)
-        
-        # Set pin_memory based on device
-        pin_memory = self.device.type == 'cuda' and num_workers == 0
-        
+        # REMOVE pin_memory argument - DataLoader will handle it internally
         train_dataloader, train_dataset = create_multi_dataloader(
             gt_paths=gt_paths,
             steps=steps,
@@ -766,14 +749,11 @@ class ParallelFusionTrainer:
             batch_size=self.config.batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=pin_memory,
+            # pin_memory=pin_memory,  # ← REMOVE THIS LINE
             model_dir=self.config.rife_model_dir,
             mix_strategy=mix_strategy,
             path_weights=path_weights,
-            cache_flows=cache_flows,
-            precompute_flows=precompute_flows,
-            device_for_flows=device_for_flows,
-            model_parallel=use_parallel
+            cache_flows=cache_flows
         )
         
         print("\nDataset Configuration:")
@@ -781,10 +761,6 @@ class ParallelFusionTrainer:
         print(f"Batch size: {self.config.batch_size}")
         print(f"Batches per epoch: {len(train_dataloader)}")
         print(f"Num workers: {num_workers}")
-        print(f"Pin memory: {pin_memory}")
-        print(f"Cache flows: {cache_flows}")
-        print(f"Precompute flows: {precompute_flows}")
-        print(f"Device for flows: {device_for_flows}")
         
         return train_dataloader, train_dataset
     
@@ -1245,10 +1221,6 @@ def main():
                         help='Number of data loading workers')
     parser.add_argument('--force_single_worker', action='store_true',
                         help='Force single worker data loading (useful for debugging)')
-    parser.add_argument('--device_for_flows', type=str, default='cpu',
-                        help='Device for flow extraction (cpu, cuda, cuda:0, etc.)')
-    parser.add_argument('--no_precompute_flows', action='store_true',
-                        help='Disable flow precomputation (not recommended with model parallelism)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
     parser.add_argument('--seed', type=int, default=42,
@@ -1256,31 +1228,24 @@ def main():
     parser.add_argument('--mix_strategy', type=str, default='uniform',
                         help='Dataset mixing strategy')
     parser.add_argument('--cache_flows', action='store_true',
-                        help='Cache extracted flows (automatically enabled with model parallelism)')
+                        help='Cache extracted flows (recommended when using model parallelism)')
     parser.add_argument('--precache_flows', action='store_true',
-                        help='Alias for cache_flows with precomputation')
+                        help='Pre-cache all flows before training starts (uses more memory but avoids runtime extraction)')
     
     args = parser.parse_args()
     
-    # Handle flow caching arguments
-    if args.precache_flows:
-        args.cache_flows = True
-    
-    # Force settings for model parallelism
+    # Force single worker if requested or if using model parallelism without flow caching
     if args.force_single_worker:
         args.num_workers = 0
         print("Forcing single worker data loading")
-    elif args.model_parallel:
-        if not args.cache_flows:
-            print("\n" + "="*60)
-            print("Model parallelism detected!")
-            print("Automatically enabling flow caching for compatibility.")
-            print("="*60 + "\n")
-            args.cache_flows = True
-        # Always use 0 workers with model parallelism to avoid conflicts
-        if args.num_workers > 0:
-            print(f"Setting num_workers=0 for model parallelism (was {args.num_workers})")
-            args.num_workers = 0
+    elif args.model_parallel and not args.cache_flows and not args.precache_flows:
+        print("\n" + "="*60)
+        print("WARNING: Using model parallelism without flow caching!")
+        print("This may cause device conflicts with multiple workers.")
+        print("Consider adding --cache_flows or --precache_flows")
+        print("Setting num_workers=0 for safety")
+        print("="*60 + "\n")
+        args.num_workers = 0
     
     # Set random seed
     torch.manual_seed(args.seed)

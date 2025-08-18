@@ -18,12 +18,11 @@ from typing import List, Union, Tuple
 class RIFEDatasetMulti(Dataset):
     """
     Enhanced RIFE Dataset supporting multiple paths and steps for diverse training scenarios
-    Fixed for multiprocessing with CUDA and model parallelism
+    Fixed for multiprocessing with CUDA
     """
     def __init__(self, gt_paths, steps, anchor=3, scale=1.0, UHD=False, 
                  model_dir='ckpt/rifev4_25', mix_strategy='uniform', 
-                 path_weights=None, cache_flows=False, precompute_flows=True,
-                 device_for_flows='cpu', model_parallel=False):
+                 path_weights=None, cache_flows=False, precompute_flows=True):
         """
         Args:
             gt_paths (str or list): Single path or list of paths to ground truth images
@@ -36,8 +35,6 @@ class RIFEDatasetMulti(Dataset):
             path_weights (list): Weights for each path (used with 'weighted' strategy)
             cache_flows (bool): Cache extracted flows to speed up training
             precompute_flows (bool): Precompute all flows before training (recommended)
-            device_for_flows (str): Device to use for flow extraction ('cpu', 'cuda', 'cuda:0', etc.)
-            model_parallel (bool): Whether model parallelism is being used (affects GPU allocation)
         """
         # Handle single or multiple paths
         if isinstance(gt_paths, (str, Path)):
@@ -60,8 +57,6 @@ class RIFEDatasetMulti(Dataset):
         self.mix_strategy = mix_strategy
         self.cache_flows = cache_flows
         self.precompute_flows = precompute_flows
-        self.device_for_flows = device_for_flows
-        self.model_parallel = model_parallel
         self.flow_cache = {} if cache_flows else None
         
         # Setup path weights for weighted sampling
@@ -107,55 +102,40 @@ class RIFEDatasetMulti(Dataset):
         self._create_sample_order()
         
         # Precompute flows if requested (do this in main process)
-        if self.precompute_flows and self.cache_flows:
+        if self.precompute_flows:
             self._precompute_all_flows()
     
     def _setup_device(self):
         """Setup computing device - called lazily in worker processes"""
-        if self.device is not None:
-            return  # Already setup
-        
-        # If model parallelism is being used, force CPU for flow extraction
-        # to avoid conflicts with the main training model
-        if self.model_parallel:
-            self.device = torch.device("cpu")
-            print("Model parallelism detected - using CPU for flow extraction in dataset")
-            return
-        
-        # Parse device specification
-        if self.device_for_flows == 'cpu':
-            self.device = torch.device("cpu")
-        elif self.device_for_flows.startswith('cuda'):
-            if torch.cuda.is_available():
-                # Check if specific GPU is requested
-                if ':' in self.device_for_flows:
-                    gpu_id = int(self.device_for_flows.split(':')[1])
-                    if gpu_id < torch.cuda.device_count():
-                        self.device = torch.device(self.device_for_flows)
-                    else:
-                        print(f"Warning: GPU {gpu_id} not available, using CPU")
-                        self.device = torch.device("cpu")
+        if torch.cuda.is_available():
+            worker_info = torch.utils.data.get_worker_info()
+            
+            # Check if we're in a model parallel environment
+            # Look for environment variables or other indicators
+            model_parallel_env = os.environ.get('MODEL_PARALLEL_MODE', 'false').lower() == 'true'
+            
+            if worker_info is not None:
+                # We're in a worker process
+                if model_parallel_env:
+                    # When model parallelism is active, use CPU for flow extraction
+                    # to avoid GPU conflicts
+                    self.device = torch.device("cpu")
+                    print(f"Worker {worker_info.id}: Using CPU for flow extraction (model parallel mode)")
                 else:
-                    # In worker process, don't automatically assign GPUs
-                    # This avoids conflicts with model parallelism
-                    worker_info = torch.utils.data.get_worker_info()
-                    if worker_info is not None:
-                        # We're in a worker process - use CPU to avoid conflicts
-                        self.device = torch.device("cpu")
-                    else:
-                        # Main process - can use GPU if available
-                        self.device = torch.device("cuda:0")
+                    # Normal mode - distribute workers across GPUs
+                    gpu_id = worker_info.id % torch.cuda.device_count()
+                    self.device = torch.device(f"cuda:{gpu_id}")
             else:
-                print("CUDA not available, using CPU for flow extraction")
-                self.device = torch.device("cpu")
-        elif self.device_for_flows == 'mps':
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            else:
-                print("MPS not available, using CPU")
-                self.device = torch.device("cpu")
+                # Main process
+                if model_parallel_env:
+                    # In model parallel mode, main process should also use CPU for flows
+                    # or a dedicated GPU not used by the main model
+                    self.device = torch.device("cpu")
+                else:
+                    self.device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
         else:
-            # Default to CPU for safety
             self.device = torch.device("cpu")
     
     def _load_model(self):
@@ -172,17 +152,10 @@ class RIFEDatasetMulti(Dataset):
                 self.model.version = 0
             self.model.load_model(self.model_dir, -1)
             self.model.eval()
+            self.model.device()
             
-            # Move model to appropriate device
-            if self.device.type == 'cuda':
-                self.model.device()  # Uses model's default GPU allocation
-            elif self.device.type == 'cpu':
-                # Keep model on CPU
-                self.model.flownet = self.model.flownet.cpu()
-                self.model.contextnet = self.model.contextnet.cpu()
-                self.model.unet = self.model.unet.cpu()
-            
-            print(f"RIFE model loaded on {self.device} for flow extraction")
+
+
     
     def _precompute_all_flows(self):
         """Precompute all flows in the main process before training starts"""
@@ -192,16 +165,8 @@ class RIFEDatasetMulti(Dataset):
         print("\nPrecomputing flows for all samples...")
         print("This may take a while but will speed up training significantly.")
         
-        # Setup device for precomputation
-        if self.model_parallel:
-            # If using model parallelism, use CPU for safety
-            print("Using CPU for flow precomputation (model parallelism detected)")
-            self.device = torch.device("cpu")
-        else:
-            # Otherwise, use specified device
-            self._setup_device()
-        
         # Load model in main process
+        self._setup_device()
         self._load_model()
         
         # Process a subset of samples to estimate time
@@ -231,14 +196,10 @@ class RIFEDatasetMulti(Dataset):
                         I0 = self._load_and_process_image(gt_path, I0_frame)
                         I1 = self._load_and_process_image(gt_path, I1_frame)
                         
-                        # Move to device for computation
-                        I0_device = I0.to(self.device, non_blocking=True)
-                        I1_device = I1.to(self.device, non_blocking=True)
-                        
                         # Extract flow and mask
-                        flow, mask = self.model.flow_extractor(I0_device, I1_device, timestep, self.scale)
+                        flow, mask = self.model.flow_extractor(I0, I1, timestep, self.scale)
                         
-                        # Store in cache (always on CPU to save memory)
+                        # Store in cache (move to CPU to save GPU memory)
                         self.flow_cache[cache_key] = {
                             'flow': flow.cpu(),
                             'mask': mask.cpu()
@@ -249,11 +210,10 @@ class RIFEDatasetMulti(Dataset):
         pbar.close()
         print(f"Precomputed {len(self.flow_cache)} unique flows")
         
-        # Clear model from memory to save resources
+        # Clear model from GPU to save memory
         del self.model
         self.model = None
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
     
     def _setup_image_properties(self, gt_path, frame_num):
         """Setup image properties based on first frame"""
@@ -417,7 +377,7 @@ class RIFEDatasetMulti(Dataset):
         img = read_image(str(img_path), img_path.suffix)
         img_tensor = torch.from_numpy(np.transpose(img.astype(np.int64), (2,0,1)))
         
-        # Always return CPU tensor
+        # Don't move to device here - return CPU tensor
         img_tensor = img_tensor.unsqueeze(0).float() / self.max_val
         return pad_image(img_tensor, padding=self.padding)
     
@@ -464,50 +424,44 @@ class RIFEDatasetMulti(Dataset):
                 cache_key = self._get_flow_cache_key(gt_path, I0_frame, I1_frame, timestep)
                 
                 if cache_key in self.flow_cache:
-                    # Use cached flows (already on CPU)
+                    # Use cached flows
                     cached_data = self.flow_cache[cache_key]
                     flow = cached_data['flow']
                     mask = cached_data['mask']
                 else:
-                    # This shouldn't happen if precompute_flows=True
-                    # But handle it gracefully
+                    # Compute flows (load model if needed)
                     if self.model is None:
                         self._setup_device()
                         self._load_model()
                     
                     # Move to device for computation
-                    I0_device = I0.to(self.device, non_blocking=True)
-                    I1_device = I1.to(self.device, non_blocking=True)
+                    I0_gpu = I0.to(self.device, non_blocking=True)
+                    I1_gpu = I1.to(self.device, non_blocking=True)
                     
                     with torch.no_grad():
-                        flow, mask = self.model.flow_extractor(I0_device, I1_device, timestep, self.scale)
+                        flow, mask = self.model.flow_extractor(I0_gpu, I1_gpu, timestep, self.scale)
                     
-                    # Always store on CPU
+                    # Move back to CPU
                     flow = flow.cpu()
                     mask = mask.cpu()
                     
-                    # Cache the result
-                    self.flow_cache[cache_key] = {
-                        'flow': flow,
-                        'mask': mask
-                    }
+                    # Cache if not precomputed
+                    if not self.precompute_flows:
+                        self.flow_cache[cache_key] = {
+                            'flow': flow,
+                            'mask': mask
+                        }
             else:
-                # Compute flows without caching (not recommended with model parallelism)
-                if self.model_parallel:
-                    raise RuntimeError(
-                        "Cannot compute flows on-the-fly with model parallelism. "
-                        "Please enable --cache_flows or --precache_flows"
-                    )
-                
+                # Compute flows without caching
                 if self.model is None:
                     self._setup_device()
                     self._load_model()
                 
-                I0_device = I0.to(self.device, non_blocking=True)
-                I1_device = I1.to(self.device, non_blocking=True)
+                I0_gpu = I0.to(self.device, non_blocking=True)
+                I1_gpu = I1.to(self.device, non_blocking=True)
                 
                 with torch.no_grad():
-                    flow, mask = self.model.flow_extractor(I0_device, I1_device, timestep, self.scale)
+                    flow, mask = self.model.flow_extractor(I0_gpu, I1_gpu, timestep, self.scale)
                 
                 flow = flow.cpu()
                 mask = mask.cpu()
@@ -581,35 +535,38 @@ def collate_fn(batch):
 
 
 def create_multi_dataloader(gt_paths, steps, anchor=3, scale=1.0, UHD=False,
-                           batch_size=4, shuffle=True, num_workers=0, 
-                           pin_memory=False, model_dir='ckpt/rifev4_25', 
-                           mix_strategy='uniform', path_weights=None, 
-                           cache_flows=False, precompute_flows=True,
-                           device_for_flows='cpu', model_parallel=False):
+                           batch_size=4, shuffle=True, num_workers=0, pin_memory=False,
+                           model_dir='ckpt/rifev4_25', mix_strategy='uniform',
+                           path_weights=None, cache_flows=False, precompute_flows=True):
     """
     Create a DataLoader with multiple dataset paths
     
     Args:
         gt_paths: Single path or list of paths to ground truth images
         steps: Single step or list of steps for each path
+        anchor: Number of anchor frames for flow computation
+        scale: Scale factor for processing
+        UHD: Support for 4K images
+        batch_size: Batch size for DataLoader
+        shuffle: Whether to shuffle the dataset
+        num_workers: Number of data loading workers
+        pin_memory: Pin memory for faster data transfer to GPU
+        model_dir: Path to RIFE model directory
         mix_strategy: How to mix samples ('uniform', 'weighted', 'sequential', 'balanced')
         path_weights: Weights for each path when using 'weighted' strategy
         cache_flows: Cache extracted flows to speed up training
         precompute_flows: Precompute all flows before training (recommended)
-        device_for_flows: Device to use for flow extraction
-        model_parallel: Whether model parallelism is being used
     
     Returns:
         DataLoader, Dataset
     """
-    # When using model parallelism, ensure flows are cached or precomputed
-    if model_parallel and not cache_flows:
-        print("\n" + "="*60)
-        print("WARNING: Model parallelism detected without flow caching!")
-        print("Enabling flow caching automatically for compatibility.")
-        print("="*60 + "\n")
-        cache_flows = True
-        precompute_flows = True
+    # Set multiprocessing start method for CUDA
+    if num_workers > 0 and torch.cuda.is_available():
+        import multiprocessing as mp
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass  # Already set
     
     dataset = RIFEDatasetMulti(
         gt_paths=gt_paths,
@@ -621,10 +578,12 @@ def create_multi_dataloader(gt_paths, steps, anchor=3, scale=1.0, UHD=False,
         mix_strategy=mix_strategy,
         path_weights=path_weights,
         cache_flows=cache_flows,
-        precompute_flows=precompute_flows and cache_flows,
-        device_for_flows=device_for_flows,
-        model_parallel=model_parallel
+        precompute_flows=precompute_flows and cache_flows
     )
+    
+    # Auto-adjust pin_memory based on device and workers
+    if pin_memory is None:
+        pin_memory = torch.cuda.is_available() and num_workers > 0
     
     dataloader = DataLoader(
         dataset=dataset,
@@ -667,10 +626,6 @@ def main():
                         help='Number of data loading workers')
     parser.add_argument('--test_samples', type=int, default=10,
                         help='Number of samples to test')
-    parser.add_argument('--model_parallel', action='store_true',
-                        help='Simulate model parallelism mode')
-    parser.add_argument('--device_for_flows', type=str, default='cpu',
-                        help='Device for flow extraction (cpu, cuda, cuda:0, etc.)')
     
     args = parser.parse_args()
     
@@ -686,9 +641,7 @@ def main():
         mix_strategy=args.mix_strategy,
         path_weights=args.path_weights,
         cache_flows=args.cache_flows,
-        precompute_flows=not args.no_precompute,
-        device_for_flows=args.device_for_flows,
-        model_parallel=args.model_parallel
+        precompute_flows=not args.no_precompute
     )
     
     # Print statistics
