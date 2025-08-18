@@ -97,17 +97,22 @@ class ChannelAttention(nn.Module):
 
 class CrossAttentionFusion(nn.Module):
     """Cross-attention mechanism for fusing features from multiple anchors"""
-    def __init__(self, channels, num_heads=4):
+    def __init__(self, channels, num_heads=4, downsample_factor=8):
         super().__init__()
         self.num_heads = num_heads
         self.channels = channels
         self.head_dim = channels // num_heads
-        
+        self.downsample_factor = downsample_factor
+
         self.q_conv = nn.Conv2d(channels, channels, 1)
         self.k_conv = nn.Conv2d(channels, channels, 1)
         self.v_conv = nn.Conv2d(channels, channels, 1)
         self.out_conv = nn.Conv2d(channels, channels, 1)
-        
+
+        # Added downsampling and upsampling layers
+        self.downsample = nn.MaxPool2d(kernel_size=downsample_factor)
+        self.upsample = nn.Upsample(scale_factor=downsample_factor, mode='bilinear', align_corners=False)
+
         self.scale = self.head_dim ** -0.5
     
     def forward(self, query, keys, values):
@@ -120,31 +125,40 @@ class CrossAttentionFusion(nn.Module):
         B, C, H, W = query.shape
         N = keys.shape[1]
         
-        # Compute Q
-        q = self.q_conv(query)  # [B, C, H, W]
-        q = q.view(B, self.num_heads, self.head_dim, H*W).transpose(-2, -1)  # [B, heads, HW, head_dim]
+        # Downsample features before attention
+        q_down = self.downsample(query)
+        keys_down = self.downsample(keys.view(B*N, C, H, W)).view(B, N, C, H//self.downsample_factor, W//self.downsample_factor)
+        values_down = self.downsample(values.view(B*N, C, H, W)).view(B, N, C, H//self.downsample_factor, W//self.downsample_factor)
         
-        # Compute K and V for all anchors
+        H_down, W_down = q_down.shape[-2:]
+
+        # Compute Q on downsampled features
+        q = self.q_conv(q_down)
+        q = q.view(B, self.num_heads, self.head_dim, H_down * W_down).transpose(-2, -1)
+        
+        # Compute K and V for all anchors on downsampled features
         all_attention = []
         for i in range(N):
-            k = self.k_conv(keys[:, i])  # [B, C, H, W]
-            v = self.v_conv(values[:, i])  # [B, C, H, W]
+            k = self.k_conv(keys_down[:, i])
+            v = self.v_conv(values_down[:, i])
             
-            k = k.view(B, self.num_heads, self.head_dim, H*W)  # [B, heads, head_dim, HW]
-            v = v.view(B, self.num_heads, self.head_dim, H*W).transpose(-2, -1)  # [B, heads, HW, head_dim]
+            k = k.view(B, self.num_heads, self.head_dim, H_down * W_down)
+            v = v.view(B, self.num_heads, self.head_dim, H_down * W_down).transpose(-2, -1)
             
             # Compute attention scores
-            scores = torch.matmul(q, k) * self.scale  # [B, heads, HW, HW]
+            scores = torch.matmul(q, k) * self.scale
             attention = F.softmax(scores, dim=-1)
             
             # Apply attention to values
-            out = torch.matmul(attention, v)  # [B, heads, HW, head_dim]
+            out = torch.matmul(attention, v)
             all_attention.append(out)
         
-        # Combine attention from all anchors
-        combined = torch.stack(all_attention, dim=1).mean(dim=1)  # [B, heads, HW, head_dim]
-        combined = combined.transpose(-2, -1).contiguous().view(B, C, H, W)
+        # Combine and reshape
+        combined = torch.stack(all_attention, dim=1).mean(dim=1)
+        combined = combined.transpose(-2, -1).contiguous().view(B, C, H_down, W_down)
         
+        # Upsample back to original resolution and apply final convolution
+        combined = self.upsample(combined)
         return self.out_conv(combined)
 
 
