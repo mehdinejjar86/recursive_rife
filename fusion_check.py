@@ -351,7 +351,7 @@ def test_different_sizes(use_parallel=False, parallel_strategy='spatial'):
     print()
     
     # Create model
-    base_model = create_fusion_model(num_anchors=3, base_channels=32)
+    base_model = create_fusion_model(num_anchors=3, base_channels=64)
     
     if use_parallel and torch.cuda.is_available() and torch.cuda.device_count() > 1:
         model = ModelParallelWrapper(base_model, split_strategy=parallel_strategy)

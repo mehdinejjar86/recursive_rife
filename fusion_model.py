@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import init
-import numpy as np
-from typing import List, Tuple, Dict, Optional
 
 
 class ConvBlock(nn.Module):
@@ -596,7 +594,7 @@ if __name__ == "__main__":
     # Create dummy inputs
     batch_size = 2
     num_anchors = 3
-    height, width = 256, 256
+    height, width = 2048, 2048
     
     I0_all = torch.randn(batch_size, num_anchors, 3, height, width).to(device)
     I1_all = torch.randn(batch_size, num_anchors, 3, height, width).to(device)
