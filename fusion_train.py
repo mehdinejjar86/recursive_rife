@@ -606,8 +606,9 @@ class ParallelFusionTrainer:
         if self.use_wandb:
             self._init_wandb()
         
-        # Create dataloader
+        # Create dataloaders (both train and validation)
         self.train_loader, self.train_dataset = self._create_dataloader()
+        self.val_loader, self.val_dataset = self._create_validation_dataloader()
         
         # Create model with parallelism if multiple GPUs available
         self.model = self._create_parallel_model()
@@ -633,6 +634,8 @@ class ParallelFusionTrainer:
         self.start_epoch = 0
         self.best_psnr = 0
         self.best_ssim = 0
+        self.best_val_psnr = 0
+        self.best_val_ssim = 0
         self.epoch_metrics = []
         
         # Load checkpoint if exists
@@ -746,12 +749,110 @@ class ParallelFusionTrainer:
             cache_flows=cache_flows
         )
         
-        print("\nDataset Configuration:")
+        print("\nTraining Dataset Configuration:")
         print(f"Total samples: {len(train_dataset)}")
         print(f"Batch size: {self.config.batch_size}")
         print(f"Batches per epoch: {len(train_dataloader)}")
         
         return train_dataloader, train_dataset
+    
+    def _create_validation_dataloader(self):
+        """Create validation dataloader"""
+        # Check if we have separate validation paths
+        val_paths = getattr(self.config, 'val_paths', None)
+        val_steps = getattr(self.config, 'val_steps', None)
+        val_split = getattr(self.config, 'val_split', 0.1)
+        
+        if val_paths is not None:
+            # Use separate validation dataset
+            if isinstance(val_steps, int):
+                val_steps = [val_steps] * len(val_paths)
+            elif val_steps is None:
+                val_steps = self.config.steps  # Use same steps as training
+                if isinstance(val_steps, int):
+                    val_steps = [val_steps] * len(val_paths)
+            elif len(val_steps) == 1 and len(val_paths) > 1:
+                val_steps = val_steps * len(val_paths)
+            
+            print("\nValidation Dataset (Separate Paths):")
+            print(f"Validation paths: {val_paths}")
+            print(f"Validation steps: {val_steps}")
+            
+            # Adjust num_workers for MPS
+            num_workers = self.config.num_workers
+            if self.device.type == 'mps' and num_workers > 0:
+                num_workers = 0
+            
+            val_dataloader, val_dataset = create_multi_dataloader(
+                gt_paths=val_paths,
+                steps=val_steps,
+                anchor=self.config.num_anchors,
+                scale=self.config.scale,
+                UHD=self.config.UHD,
+                batch_size=self.config.batch_size,
+                shuffle=False,  # Don't shuffle validation
+                num_workers=num_workers,
+                model_dir=self.config.rife_model_dir,
+                mix_strategy='uniform',
+                path_weights=None,
+                cache_flows=getattr(self.config, 'cache_flows', False)
+            )
+            
+            print(f"Validation samples: {len(val_dataset)}")
+            print(f"Validation batches: {len(val_dataloader)}")
+            
+        elif val_split > 0:
+            # Split from training dataset
+            print(f"\nValidation Dataset (Split from Training): {val_split:.1%}")
+            
+            # Create validation dataset by splitting the training paths
+            from torch.utils.data import random_split
+            
+            total_samples = len(self.train_dataset)
+            val_size = int(total_samples * val_split)
+            train_size = total_samples - val_size
+            
+            # Split dataset
+            train_subset, val_subset = random_split(
+                self.train_dataset, 
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(42)
+            )
+            
+            # Update train dataloader with subset
+            num_workers = self.config.num_workers
+            if self.device.type == 'mps' and num_workers > 0:
+                num_workers = 0
+            
+            self.train_loader = DataLoader(
+                train_subset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=torch.cuda.is_available()
+            )
+            
+            # Create validation dataloader
+            val_dataloader = DataLoader(
+                val_subset,
+                batch_size=self.config.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=torch.cuda.is_available()
+            )
+            
+            val_dataset = val_subset
+            
+            print(f"Training samples after split: {len(train_subset)}")
+            print(f"Validation samples: {len(val_subset)}")
+            print(f"Validation batches: {len(val_dataloader)}")
+            
+        else:
+            # No validation
+            print("\nNo validation dataset configured (val_split=0)")
+            return None, None
+        
+        return val_dataloader, val_dataset
     
     def _create_parallel_model(self):
         """Create model with optional parallelism"""
@@ -845,7 +946,7 @@ class ParallelFusionTrainer:
         epoch_ssim = 0
         num_batches = 0
         
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config.epochs}")
+        pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch}/{self.config.epochs}")
         
         for batch_idx, batch in enumerate(pbar):
             # Move data to device
@@ -917,10 +1018,10 @@ class ParallelFusionTrainer:
             # Log to W&B periodically
             if self.use_wandb and batch_idx % 10 == 0:
                 wandb.log({
-                    'batch/loss': total_loss.item(),
-                    'batch/psnr': batch_psnr,
-                    'batch/ssim': batch_ssim,
-                    'batch/lr': self.optimizer.param_groups[0]['lr'],
+                    'train/batch_loss': total_loss.item(),
+                    'train/batch_psnr': batch_psnr,
+                    'train/batch_ssim': batch_ssim,
+                    'train/lr': self.optimizer.param_groups[0]['lr'],
                     'step': epoch * len(self.train_loader) + batch_idx
                 })
             
@@ -931,7 +1032,7 @@ class ParallelFusionTrainer:
                     max_mem_mb = torch.cuda.max_memory_allocated(i) / 1024**2
                     if mem_mb > 0:
                         pbar.set_description(
-                            f"Epoch {epoch}/{self.config.epochs} | GPU{i}: {mem_mb:.0f}/{max_mem_mb:.0f}MB"
+                            f"Train Epoch {epoch}/{self.config.epochs} | GPU{i}: {mem_mb:.0f}/{max_mem_mb:.0f}MB"
                         )
                         if self.use_wandb:
                             wandb.log({
@@ -951,7 +1052,75 @@ class ParallelFusionTrainer:
         
         return epoch_losses
     
-    def save_checkpoint(self, epoch, is_best=False):
+    def validate_epoch(self, epoch):
+        """Validate for one epoch"""
+        if self.val_loader is None:
+            return None
+        
+        self.model.eval()
+        
+        val_losses = {'total': 0, 'l1': 0, 'perceptual': 0, 'consistency': 0}
+        val_psnr = 0
+        val_ssim = 0
+        num_batches = 0
+        
+        pbar = tqdm(self.val_loader, desc=f"Val Epoch {epoch}/{self.config.epochs}")
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(pbar):
+                # Move data to device
+                I0_all = batch['I0'].to(self.device, non_blocking=True)
+                I1_all = batch['I1'].to(self.device, non_blocking=True)
+                flows_all = batch['flows'].to(self.device, non_blocking=True)
+                masks_all = batch['masks'].to(self.device, non_blocking=True)
+                timesteps = batch['timesteps'].to(self.device, non_blocking=True)
+                I_gt = batch['I_gt'].to(self.device, non_blocking=True)
+                
+                # Forward pass
+                output, aux_outputs = self.model(I0_all, I1_all, flows_all, masks_all, timesteps)
+                
+                # Ensure output is on same device as ground truth
+                if output.device != I_gt.device:
+                    output = output.to(I_gt.device)
+                
+                # Compute loss
+                losses = self.loss_fn(output, I_gt, aux_outputs)
+                
+                # Calculate metrics
+                output_resized = self.metrics_calc.resize_for_metrics(output)
+                I_gt_resized = self.metrics_calc.resize_for_metrics(I_gt)
+                
+                batch_psnr = self.metrics_calc.calculate_psnr(output_resized, I_gt_resized)
+                batch_ssim = self.metrics_calc.calculate_ssim(output_resized, I_gt_resized)
+                
+                val_psnr += batch_psnr
+                val_ssim += batch_ssim
+                
+                # Update validation losses
+                for key in val_losses:
+                    val_losses[key] += losses[key].item()
+                
+                num_batches += 1
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f"{losses['total'].item():.4f}",
+                    'psnr': f"{batch_psnr:.2f}",
+                    'ssim': f"{batch_ssim:.4f}"
+                })
+        
+        # Average metrics
+        for key in val_losses:
+            val_losses[key] /= num_batches
+        val_psnr /= num_batches
+        val_ssim /= num_batches
+        
+        val_losses['psnr'] = val_psnr
+        val_losses['ssim'] = val_ssim
+        
+        return val_losses
+    
+    def save_checkpoint(self, epoch, is_best=False, is_best_val=False):
         """Save model checkpoint"""
         if hasattr(self.model, 'models'):
             # Save first model's state (they're synchronized)
@@ -974,6 +1143,8 @@ class ParallelFusionTrainer:
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'best_psnr': self.best_psnr,
             'best_ssim': self.best_ssim,
+            'best_val_psnr': self.best_val_psnr,
+            'best_val_ssim': self.best_val_ssim,
             'epoch_metrics': self.epoch_metrics,
             'config': vars(self.config),
             'wandb_run_id': wandb.run.id if self.use_wandb else None
@@ -990,12 +1161,22 @@ class ParallelFusionTrainer:
         if is_best:
             best_path = self.checkpoint_dir / 'best_model.pth'
             torch.save(checkpoint, best_path)
-            print(f"  Best model saved!")
+            print(f"  Best training model saved!")
             
             if self.use_wandb:
                 wandb.save(str(best_path))
                 wandb.run.summary["best_psnr"] = self.best_psnr
                 wandb.run.summary["best_ssim"] = self.best_ssim
+        
+        if is_best_val:
+            best_val_path = self.checkpoint_dir / 'best_val_model.pth'
+            torch.save(checkpoint, best_val_path)
+            print(f"  Best validation model saved!")
+            
+            if self.use_wandb:
+                wandb.save(str(best_val_path))
+                wandb.run.summary["best_val_psnr"] = self.best_val_psnr
+                wandb.run.summary["best_val_ssim"] = self.best_val_ssim
         
         latest_path = self.checkpoint_dir / 'latest_model.pth'
         torch.save(checkpoint, latest_path)
@@ -1027,10 +1208,13 @@ class ParallelFusionTrainer:
         self.start_epoch = checkpoint['epoch'] + 1
         self.best_psnr = checkpoint.get('best_psnr', 0)
         self.best_ssim = checkpoint.get('best_ssim', 0)
+        self.best_val_psnr = checkpoint.get('best_val_psnr', 0)
+        self.best_val_ssim = checkpoint.get('best_val_ssim', 0)
         self.epoch_metrics = checkpoint.get('epoch_metrics', [])
         
         print(f"Checkpoint loaded from {checkpoint_path}")
         print(f"Resuming from epoch {self.start_epoch}")
+        print(f"Best train PSNR: {self.best_psnr:.2f} dB, Best val PSNR: {self.best_val_psnr:.2f} dB")
     
     def train(self):
         """Main training loop"""
@@ -1043,12 +1227,25 @@ class ParallelFusionTrainer:
             # Train
             train_losses = self.train_epoch(epoch)
             
+            # Validate
+            val_losses = None
+            if self.val_loader is not None:
+                val_losses = self.validate_epoch(epoch)
+            
             # Check if best model
             is_best = train_losses['psnr'] > self.best_psnr
             if is_best:
                 self.best_psnr = train_losses['psnr']
                 self.best_ssim = train_losses['ssim']
-                print(f"  New best model! PSNR: {self.best_psnr:.2f} dB")
+                print(f"  New best training model! PSNR: {self.best_psnr:.2f} dB")
+            
+            is_best_val = False
+            if val_losses is not None:
+                is_best_val = val_losses['psnr'] > self.best_val_psnr
+                if is_best_val:
+                    self.best_val_psnr = val_losses['psnr']
+                    self.best_val_ssim = val_losses['ssim']
+                    print(f"  New best validation model! PSNR: {self.best_val_psnr:.2f} dB")
             
             # Update scheduler
             if self.scheduler:
@@ -1058,34 +1255,44 @@ class ParallelFusionTrainer:
             for name, value in train_losses.items():
                 self.writer.add_scalar(f'train/{name}', value, epoch)
             
+            if val_losses is not None:
+                for name, value in val_losses.items():
+                    self.writer.add_scalar(f'val/{name}', value, epoch)
+            
             self.writer.add_scalar('learning_rate', 
                                   self.optimizer.param_groups[0]['lr'], epoch)
             
             # Log metrics to W&B
             if self.use_wandb:
-                wandb_metrics = {f'epoch/{k}': v for k, v in train_losses.items()}
+                wandb_metrics = {f'train/{k}': v for k, v in train_losses.items()}
+                if val_losses is not None:
+                    wandb_metrics.update({f'val/{k}': v for k, v in val_losses.items()})
                 wandb_metrics['epoch'] = epoch
                 wandb_metrics['learning_rate'] = self.optimizer.param_groups[0]['lr']
                 wandb_metrics['is_best'] = is_best
+                wandb_metrics['is_best_val'] = is_best_val
                 wandb.log(wandb_metrics)
             
             # Print summary
             epoch_time = (datetime.now() - epoch_start_time).total_seconds()
             print(f"\nEpoch {epoch}/{self.config.epochs} ({epoch_time:.1f}s)")
-            print(f"  Loss: {train_losses['total']:.4f}")
-            print(f"  PSNR: {train_losses['psnr']:.2f} dB")
-            print(f"  SSIM: {train_losses['ssim']:.4f}")
+            print(f"  Train - Loss: {train_losses['total']:.4f}, PSNR: {train_losses['psnr']:.2f} dB, SSIM: {train_losses['ssim']:.4f}")
+            if val_losses is not None:
+                print(f"  Val   - Loss: {val_losses['total']:.4f}, PSNR: {val_losses['psnr']:.2f} dB, SSIM: {val_losses['ssim']:.4f}")
             print(f"  LR: {self.optimizer.param_groups[0]['lr']:.6f}")
             
             # Save checkpoint
-            self.save_checkpoint(epoch, is_best)
+            self.save_checkpoint(epoch, is_best, is_best_val)
             
             # Store metrics
-            self.epoch_metrics.append({
+            epoch_metric = {
                 'epoch': epoch,
                 'train': train_losses,
                 'lr': self.optimizer.param_groups[0]['lr']
-            })
+            }
+            if val_losses is not None:
+                epoch_metric['val'] = val_losses
+            self.epoch_metrics.append(epoch_metric)
             
             # Save metrics JSON
             with open(self.checkpoint_dir / 'metrics.json', 'w') as f:
@@ -1097,8 +1304,9 @@ class ParallelFusionTrainer:
             wandb.finish()
         
         print("\nTraining completed!")
-        print(f"Best PSNR: {self.best_psnr:.2f} dB")
-        print(f"Best SSIM: {self.best_ssim:.4f}")
+        print(f"Best training PSNR: {self.best_psnr:.2f} dB, SSIM: {self.best_ssim:.4f}")
+        if self.val_loader is not None:
+            print(f"Best validation PSNR: {self.best_val_psnr:.2f} dB, SSIM: {self.best_val_ssim:.4f}")
 
 
 def main():
