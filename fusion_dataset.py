@@ -109,35 +109,21 @@ class RIFEDatasetMulti(Dataset):
         """Setup computing device - called lazily in worker processes"""
         if torch.cuda.is_available():
             worker_info = torch.utils.data.get_worker_info()
-            
-            # Check if we're in a model parallel environment
-            # Look for environment variables or other indicators
-            model_parallel_env = os.environ.get('MODEL_PARALLEL_MODE', 'false').lower() == 'true'
-            
             if worker_info is not None:
                 # We're in a worker process
-                if model_parallel_env:
-                    # When model parallelism is active, use CPU for flow extraction
-                    # to avoid GPU conflicts
-                    self.device = torch.device("cpu")
-                    print(f"Worker {worker_info.id}: Using CPU for flow extraction (model parallel mode)")
-                else:
-                    # Normal mode - distribute workers across GPUs
-                    gpu_id = worker_info.id % torch.cuda.device_count()
-                    self.device = torch.device(f"cuda:{gpu_id}")
+                # Use round-robin GPU assignment for workers
+                gpu_id = worker_info.id % torch.cuda.device_count()
+                self.device = torch.device(f"cuda:{gpu_id}")
+                # Set the current CUDA device for this worker
+                torch.cuda.set_device(gpu_id)
             else:
                 # Main process
-                if model_parallel_env:
-                    # In model parallel mode, main process should also use CPU for flows
-                    # or a dedicated GPU not used by the main model
-                    self.device = torch.device("cpu")
-                else:
-                    self.device = torch.device("cuda")
+                self.device = torch.device("cuda")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             self.device = torch.device("mps")
         else:
             self.device = torch.device("cpu")
-    
+
     def _load_model(self):
         """Load RIFE model - called lazily when needed"""
         if self.model is None:
@@ -147,15 +133,44 @@ class RIFEDatasetMulti(Dataset):
             if self.device is None:
                 self._setup_device()
             
+            # Create model
             self.model = Model()
             if not hasattr(self.model, 'version'):
                 self.model.version = 0
+            
+            # Load model weights first (before moving to device)
             self.model.load_model(self.model_dir, -1)
             self.model.eval()
-            self.model.device()
             
-
-
+            # Move entire model to the correct device
+            # Use device() method if available, otherwise manually move
+            if hasattr(self.model, 'device'):
+                # This should handle the model's internal device management
+                if torch.cuda.is_available():
+                    # Set the device for the model's internal components
+                    worker_info = torch.utils.data.get_worker_info()
+                    if worker_info is not None:
+                        gpu_id = worker_info.id % torch.cuda.device_count()
+                        # Override the model's device method to use specific GPU
+                        original_device = self.model.device
+                        def custom_device():
+                            # First call original device method
+                            original_device()
+                            # Then ensure everything is on the correct GPU
+                            self.model.flownet = self.model.flownet.to(self.device)
+                            if hasattr(self.model, 'contextnet'):
+                                self.model.contextnet = self.model.contextnet.to(self.device)
+                            if hasattr(self.model, 'unet'):
+                                self.model.unet = self.model.unet.to(self.device)
+                        custom_device()
+                    else:
+                        self.model.device()
+                else:
+                    self.model.device()
+            else:
+                # Manually move model to device
+                self.model = self.model.to(self.device)
+                
     
     def _precompute_all_flows(self):
         """Precompute all flows in the main process before training starts"""
@@ -535,31 +550,17 @@ def collate_fn(batch):
 
 
 def create_multi_dataloader(gt_paths, steps, anchor=3, scale=1.0, UHD=False,
-                           batch_size=4, shuffle=True, num_workers=0, pin_memory=False,
+                           batch_size=4, shuffle=True, num_workers=0, 
                            model_dir='ckpt/rifev4_25', mix_strategy='uniform',
                            path_weights=None, cache_flows=False, precompute_flows=True):
     """
     Create a DataLoader with multiple dataset paths
-    
-    Args:
-        gt_paths: Single path or list of paths to ground truth images
-        steps: Single step or list of steps for each path
-        anchor: Number of anchor frames for flow computation
-        scale: Scale factor for processing
-        UHD: Support for 4K images
-        batch_size: Batch size for DataLoader
-        shuffle: Whether to shuffle the dataset
-        num_workers: Number of data loading workers
-        pin_memory: Pin memory for faster data transfer to GPU
-        model_dir: Path to RIFE model directory
-        mix_strategy: How to mix samples ('uniform', 'weighted', 'sequential', 'balanced')
-        path_weights: Weights for each path when using 'weighted' strategy
-        cache_flows: Cache extracted flows to speed up training
-        precompute_flows: Precompute all flows before training (recommended)
-    
-    Returns:
-        DataLoader, Dataset
     """
+    # Force single worker when not caching flows to avoid CUDA issues
+    if not cache_flows and num_workers > 0 and torch.cuda.is_available():
+        print("Warning: Disabling multiprocessing (num_workers=0) when cache_flows=False to avoid CUDA conflicts")
+        num_workers = 0
+    
     # Set multiprocessing start method for CUDA
     if num_workers > 0 and torch.cuda.is_available():
         import multiprocessing as mp
@@ -581,18 +582,14 @@ def create_multi_dataloader(gt_paths, steps, anchor=3, scale=1.0, UHD=False,
         precompute_flows=precompute_flows and cache_flows
     )
     
-    # Auto-adjust pin_memory based on device and workers
-    if pin_memory is None:
-        pin_memory = torch.cuda.is_available() and num_workers > 0
-    
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=pin_memory,
-        persistent_workers=num_workers > 0  # Keep workers alive between epochs
+        pin_memory=torch.cuda.is_available() and num_workers > 0,
+        persistent_workers=num_workers > 0
     )
     
     return dataloader, dataset
