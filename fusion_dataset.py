@@ -102,7 +102,7 @@ class RIFEDatasetMulti(Dataset):
         self._create_sample_order()
         
         # Precompute flows if requested (do this in main process)
-        if self.precompute_flows:
+        if self.precompute_flows and self.cache_flows:
             self._precompute_all_flows()
     
     def _setup_device(self):
@@ -207,12 +207,16 @@ class RIFEDatasetMulti(Dataset):
                     cache_key = self._get_flow_cache_key(gt_path, I0_frame, I1_frame, timestep)
                     
                     if cache_key not in self.flow_cache:
-                        # Load and process images
+                        # Load and process images (returns CPU tensors)
                         I0 = self._load_and_process_image(gt_path, I0_frame)
                         I1 = self._load_and_process_image(gt_path, I1_frame)
                         
-                        # Extract flow and mask
-                        flow, mask = self.model.flow_extractor(I0, I1, timestep, self.scale)
+                        # CRITICAL FIX: Move images to same device as model before flow extraction
+                        I0_gpu = I0.to(self.device, non_blocking=True)
+                        I1_gpu = I1.to(self.device, non_blocking=True)
+                        
+                        # Extract flow and mask on GPU
+                        flow, mask = self.model.flow_extractor(I0_gpu, I1_gpu, timestep, self.scale)
                         
                         # Store in cache (move to CPU to save GPU memory)
                         self.flow_cache[cache_key] = {
