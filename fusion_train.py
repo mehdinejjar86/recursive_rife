@@ -40,6 +40,8 @@ class ModelParallelWrapper(nn.Module):
         self.num_gpus = num_gpus or torch.cuda.device_count()
         self.split_strategy = split_strategy
         self.max_attention_size = max_attention_size
+        self.num_anchors = base_model.num_anchors
+        self.base_channels = base_model.base_channels
         
         if self.num_gpus <= 1:
             # Single GPU - no parallelism needed
@@ -51,26 +53,67 @@ class ModelParallelWrapper(nn.Module):
             for i in range(self.num_gpus):
                 # Create a model copy on each GPU with dynamic attention
                 model_copy = create_fusion_model(
-                    num_anchors=base_model.num_anchors,
-                    base_channels=base_model.base_channels,
+                    num_anchors=self.num_anchors,
+                    base_channels=self.base_channels,
                     max_attention_size=max_attention_size
                 )
+                # Move entire model to the specific GPU
                 model_copy = model_copy.cuda(i)
+                
+                # Ensure all submodules are on the correct device
+                for module in model_copy.modules():
+                    if hasattr(module, 'to'):
+                        module.to(f'cuda:{i}')
+                
                 self.models.append(model_copy)
             self.parallel_mode = True
             
             # Share parameters across GPUs (they process different parts of same batch)
             if self.num_gpus > 1:
                 # Sync parameters from GPU 0 to all others
+                source_state = self.models[0].state_dict()
                 for i in range(1, self.num_gpus):
-                    for param_main, param_copy in zip(
-                        self.models[0].parameters(), 
-                        self.models[i].parameters()
-                    ):
-                        param_copy.data = param_main.data
+                    # Load the state dict to ensure proper parameter sharing
+                    self.models[i].load_state_dict(source_state)
             
-            print(f"Model Parallel: Using {self.num_gpus} GPUs with {split_strategy} strategy")
-            print(f"Max attention size: {int(np.sqrt(max_attention_size))}×{int(np.sqrt(max_attention_size))}")
+    def sync_gradients(self):
+        """Synchronize gradients across model copies when using model parallelism"""
+        if not self.parallel_mode or self.num_gpus <= 1:
+            return
+        
+        # Average gradients from all GPUs to GPU 0
+        for param_idx, param_main in enumerate(self.models[0].parameters()):
+            if param_main.grad is None:
+                continue
+                
+            # Collect gradients from all GPUs
+            grads = [param_main.grad.data]
+            for i in range(1, self.num_gpus):
+                param_copy = list(self.models[i].parameters())[param_idx]
+                if param_copy.grad is not None:
+                    grads.append(param_copy.grad.data.cuda(0))
+            
+            # Average gradients
+            if len(grads) > 1:
+                avg_grad = torch.stack(grads).mean(dim=0)
+                param_main.grad.data = avg_grad
+    
+    def sync_parameters(self):
+        """Synchronize parameters from GPU 0 to all other GPUs after optimizer step"""
+        if not self.parallel_mode or self.num_gpus <= 1:
+            return
+        
+        # Copy parameters from GPU 0 to all other GPUs
+        source_state = self.models[0].state_dict()
+        for i in range(1, self.num_gpus):
+            # Create a state dict with tensors on the target device
+            target_state = {}
+            for key, value in source_state.items():
+                if torch.is_tensor(value):
+                    target_state[key] = value.cuda(i)
+                else:
+                    target_state[key] = value
+            self.models[i].load_state_dict(target_state)
     
     def forward(self, I0_all, I1_all, flows_all, masks_all, timesteps):
         """Forward pass with optional model parallelism"""
@@ -114,14 +157,14 @@ class ModelParallelWrapper(nn.Module):
             end_h = min(H, (gpu_id + 1) * base_strip_height + overlap // 2)
             
             # Extract strip and move to appropriate GPU
-            I0_strip = I0_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
-            I1_strip = I1_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
-            flows_strip = flows_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
-            masks_strip = masks_all[:, :, start_h:end_h, :].cuda(gpu_id)
-            timesteps_gpu = timesteps.cuda(gpu_id)
-            
-            # Process strip on its GPU
             with torch.cuda.device(gpu_id):
+                I0_strip = I0_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+                I1_strip = I1_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+                flows_strip = flows_all[:, :, :, start_h:end_h, :].cuda(gpu_id)
+                masks_strip = masks_all[:, :, start_h:end_h, :].cuda(gpu_id)
+                timesteps_gpu = timesteps.cuda(gpu_id)
+                
+                # Process strip on its GPU
                 output_strip, aux_strip = self.models[gpu_id](
                     I0_strip, I1_strip, flows_strip, masks_strip, timesteps_gpu
                 )
@@ -133,7 +176,14 @@ class ModelParallelWrapper(nn.Module):
         merged_output = self._merge_spatial_outputs(outputs, H, overlap, base_strip_height)
         
         # Merge auxiliary outputs (simplified - just use first GPU's aux outputs)
-        aux_outputs = aux_outputs_list[0]
+        aux_outputs = {}
+        for key in aux_outputs_list[0].keys():
+            if isinstance(aux_outputs_list[0][key], list):
+                # For lists, just use the first GPU's version
+                aux_outputs[key] = aux_outputs_list[0][key]
+            else:
+                # For tensors, move to GPU 0
+                aux_outputs[key] = aux_outputs_list[0][key].cuda(0) if torch.is_tensor(aux_outputs_list[0][key]) else aux_outputs_list[0][key]
         
         return merged_output, aux_outputs
     
@@ -153,14 +203,14 @@ class ModelParallelWrapper(nn.Module):
                 break
             
             # Extract anchors for this GPU
-            I0_gpu = I0_all[:, start_a:end_a].cuda(gpu_id)
-            I1_gpu = I1_all[:, start_a:end_a].cuda(gpu_id)
-            flows_gpu = flows_all[:, start_a:end_a].cuda(gpu_id)
-            masks_gpu = masks_all[:, start_a:end_a].cuda(gpu_id)
-            timesteps_gpu = timesteps[:, start_a:end_a].cuda(gpu_id)
-            
-            # Process on GPU
             with torch.cuda.device(gpu_id):
+                I0_gpu = I0_all[:, start_a:end_a].cuda(gpu_id)
+                I1_gpu = I1_all[:, start_a:end_a].cuda(gpu_id)
+                flows_gpu = flows_all[:, start_a:end_a].cuda(gpu_id)
+                masks_gpu = masks_all[:, start_a:end_a].cuda(gpu_id)
+                timesteps_gpu = timesteps[:, start_a:end_a].cuda(gpu_id)
+                
+                # Process on GPU
                 output_gpu, aux_gpu = self.models[gpu_id](
                     I0_gpu, I1_gpu, flows_gpu, masks_gpu, timesteps_gpu
                 )
@@ -170,7 +220,14 @@ class ModelParallelWrapper(nn.Module):
         
         # Average outputs from different anchors
         merged_output = torch.stack(outputs, dim=0).mean(dim=0)
-        aux_outputs = aux_outputs_list[0]
+        
+        # Merge auxiliary outputs
+        aux_outputs = {}
+        for key in aux_outputs_list[0].keys():
+            if isinstance(aux_outputs_list[0][key], list):
+                aux_outputs[key] = aux_outputs_list[0][key]
+            else:
+                aux_outputs[key] = aux_outputs_list[0][key].cuda(0) if torch.is_tensor(aux_outputs_list[0][key]) else aux_outputs_list[0][key]
         
         return merged_output, aux_outputs
     
@@ -190,14 +247,14 @@ class ModelParallelWrapper(nn.Module):
                 break
             
             # Extract batch for this GPU
-            I0_gpu = I0_all[start_b:end_b].cuda(gpu_id)
-            I1_gpu = I1_all[start_b:end_b].cuda(gpu_id)
-            flows_gpu = flows_all[start_b:end_b].cuda(gpu_id)
-            masks_gpu = masks_all[start_b:end_b].cuda(gpu_id)
-            timesteps_gpu = timesteps[start_b:end_b].cuda(gpu_id)
-            
-            # Process on GPU
             with torch.cuda.device(gpu_id):
+                I0_gpu = I0_all[start_b:end_b].cuda(gpu_id)
+                I1_gpu = I1_all[start_b:end_b].cuda(gpu_id)
+                flows_gpu = flows_all[start_b:end_b].cuda(gpu_id)
+                masks_gpu = masks_all[start_b:end_b].cuda(gpu_id)
+                timesteps_gpu = timesteps[start_b:end_b].cuda(gpu_id)
+                
+                # Process on GPU
                 output_gpu, aux_gpu = self.models[gpu_id](
                     I0_gpu, I1_gpu, flows_gpu, masks_gpu, timesteps_gpu
                 )
@@ -214,8 +271,12 @@ class ModelParallelWrapper(nn.Module):
             if isinstance(aux_outputs_list[0][key], list):
                 aux_outputs[key] = aux_outputs_list[0][key]
             else:
-                aux_values = [aux[key].cuda(0) for aux in aux_outputs_list]
-                aux_outputs[key] = torch.cat(aux_values, dim=0)
+                aux_values = [aux[key].cuda(0) if torch.is_tensor(aux[key]) else aux[key] 
+                              for aux in aux_outputs_list]
+                if torch.is_tensor(aux_values[0]):
+                    aux_outputs[key] = torch.cat(aux_values, dim=0)
+                else:
+                    aux_outputs[key] = aux_values[0]
         
         return merged_output, aux_outputs
     
@@ -553,22 +614,21 @@ class ParallelFusionTrainer:
     def _create_optimizer(self):
         """Create optimizer"""
         if hasattr(self.model, 'models'):
-            # Model parallel - optimize all model copies
-            params = []
-            for model in self.model.models:
-                params.extend(model.parameters())
+            # Model parallel - optimize only the first model (others are synchronized)
+            # We'll manually sync gradients across GPUs
+            params = self.model.models[0].parameters()
         else:
             params = self.model.parameters()
         
         if self.config.optimizer == 'adam':
-            return optim.Adam(
+            optimizer = optim.Adam(
                 params,
                 lr=self.config.learning_rate,
                 betas=(0.9, 0.999),
                 weight_decay=self.config.weight_decay
             )
         elif self.config.optimizer == 'adamw':
-            return optim.AdamW(
+            optimizer = optim.AdamW(
                 params,
                 lr=self.config.learning_rate,
                 betas=(0.9, 0.999),
@@ -576,6 +636,8 @@ class ParallelFusionTrainer:
             )
         else:
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
+        
+        return optimizer
     
     def _create_scheduler(self):
         """Create learning rate scheduler"""
@@ -629,15 +691,23 @@ class ParallelFusionTrainer:
             self.optimizer.zero_grad()
             total_loss.backward()
             
+            # Synchronize gradients if using model parallelism
+            if hasattr(self.model, 'sync_gradients'):
+                self.model.sync_gradients()
+            
             # Gradient clipping
             if self.config.grad_clip > 0:
                 if hasattr(self.model, 'models'):
-                    for model in self.model.models:
-                        nn.utils.clip_grad_norm_(model.parameters(), self.config.grad_clip)
+                    # Only clip gradients on the main model (GPU 0)
+                    nn.utils.clip_grad_norm_(self.model.models[0].parameters(), self.config.grad_clip)
                 else:
                     nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
             
             self.optimizer.step()
+            
+            # Synchronize parameters if using model parallelism
+            if hasattr(self.model, 'sync_parameters'):
+                self.model.sync_parameters()
             
             # Calculate metrics
             with torch.no_grad():
@@ -706,6 +776,14 @@ class ParallelFusionTrainer:
         if hasattr(self.model, 'models'):
             # Save first model's state (they're synchronized)
             model_state = self.model.models[0].state_dict()
+            # Move all tensors to CPU for saving
+            cpu_state = {}
+            for key, value in model_state.items():
+                if torch.is_tensor(value):
+                    cpu_state[key] = value.cpu()
+                else:
+                    cpu_state[key] = value
+            model_state = cpu_state
         else:
             model_state = self.model.state_dict()
         
@@ -744,12 +822,20 @@ class ParallelFusionTrainer:
     
     def load_checkpoint(self, checkpoint_path):
         """Load model checkpoint"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')  # Load to CPU first
         
         if hasattr(self.model, 'models'):
-            # Load to all model copies
-            for model in self.model.models:
-                model.load_state_dict(checkpoint['model_state_dict'])
+            # Load to all model copies with proper device placement
+            state_dict = checkpoint['model_state_dict']
+            for i, model in enumerate(self.model.models):
+                # Create state dict with tensors on the correct device
+                device_state = {}
+                for key, value in state_dict.items():
+                    if torch.is_tensor(value):
+                        device_state[key] = value.cuda(i)
+                    else:
+                        device_state[key] = value
+                model.load_state_dict(device_state)
         else:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         
