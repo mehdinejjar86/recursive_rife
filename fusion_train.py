@@ -252,49 +252,118 @@ class ModelParallelWrapper(nn.Module):
         
         device = strips[0].device
         shape = list(strips[0].shape)
-        shape[-2] = full_height  # Update height dimension
+        
+        # Determine the dimension structure
+        if len(shape) == 4:  # [B, C, H, W]
+            shape[-2] = full_height  # Update height dimension
+            H_dim = -2
+            W_dim = -1
+        elif len(shape) == 3:  # [B, H, W] or [C, H, W]
+            if shape[-2] < shape[-1]:  # Likely [B/C, H, W]
+                shape[-2] = full_height
+                H_dim = -2
+                W_dim = -1
+            else:
+                # Handle other possible arrangements
+                shape[-2] = full_height
+                H_dim = -2
+                W_dim = -1
+        else:
+            # For other shapes, assume second-to-last is height
+            shape[-2] = full_height
+            H_dim = -2
+            W_dim = -1
         
         # Initialize merged tensor and weights
         merged = torch.zeros(shape, device=device)
-        weights = torch.zeros(shape[:-1] + [1], device=device)  # Weight for each pixel
+        
+        # Create weight tensor with same dimensions as strips but single channel for weighting
+        if len(shape) == 4:  # [B, C, H, W]
+            weight_shape = [shape[0], 1, full_height, shape[3]]
+        elif len(shape) == 3:  # [B, H, W]
+            weight_shape = [shape[0], full_height, shape[2]]
+        else:
+            weight_shape = shape.copy()
+        
+        weights = torch.zeros(weight_shape, device=device)
         
         for gpu_id, strip in enumerate(strips):
             start_h = max(0, gpu_id * base_strip_height - overlap // 2)
             end_h = min(full_height, (gpu_id + 1) * base_strip_height + overlap // 2)
-            strip_h = end_h - start_h
+            strip_h = strip.shape[H_dim]
             
-            # Create weight for blending (fade at edges)
-            weight_shape = list(strip.shape)
-            weight_shape[-1] = 1
-            weight = torch.ones(weight_shape, device=device)
-            
-            if overlap > 0:
-                # Fade in at top (except for first strip)
-                if gpu_id > 0 and overlap // 2 < strip_h:
-                    fade_size = min(overlap // 2, strip_h)
-                    fade = torch.linspace(0, 1, fade_size, device=device)
-                    weight[..., :fade_size, :] *= fade.view(1, 1, -1, 1)
+            # Create weight for blending with proper shape
+            if len(strip.shape) == 4:  # [B, C, H, W]
+                B, C, H_s, W = strip.shape
+                weight = torch.ones(B, 1, H_s, W, device=device)
                 
-                # Fade out at bottom (except for last strip)
-                if gpu_id < len(strips) - 1 and overlap // 2 < strip_h:
-                    fade_size = min(overlap // 2, strip_h)
-                    fade = torch.linspace(1, 0, fade_size, device=device)
-                    weight[..., -fade_size:, :] *= fade.view(1, 1, -1, 1)
-            
-            # Add weighted strip to merged tensor
-            if strip.dim() == 4:  # [B, C, H, W]
-                merged[:, :, start_h:end_h, :] += strip * weight[..., 0]
+                if overlap > 0:
+                    # Fade in at top (except for first strip)
+                    if gpu_id > 0 and overlap // 2 < strip_h:
+                        fade_size = min(overlap // 2, strip_h)
+                        fade = torch.linspace(0, 1, fade_size, device=device)
+                        # Reshape fade for broadcasting
+                        fade = fade.view(1, 1, -1, 1)
+                        weight[:, :, :fade_size, :] *= fade
+                    
+                    # Fade out at bottom (except for last strip)
+                    if gpu_id < len(strips) - 1 and overlap // 2 < strip_h:
+                        fade_size = min(overlap // 2, strip_h)
+                        fade = torch.linspace(1, 0, fade_size, device=device)
+                        # Reshape fade for broadcasting
+                        fade = fade.view(1, 1, -1, 1)
+                        weight[:, :, -fade_size:, :] *= fade
+                
+                # Apply weighted strip
+                weighted_strip = strip * weight.expand(-1, C, -1, -1)
+                merged[:, :, start_h:end_h, :] += weighted_strip
                 weights[:, :, start_h:end_h, :] += weight
-            elif strip.dim() == 3:  # [B, H, W]
-                merged[:, start_h:end_h, :] += strip * weight[:, :, :, 0]
-                weights[:, start_h:end_h, :] += weight[:, :, :, 0]
+                
+            elif len(strip.shape) == 3:  # [B, H, W]
+                B, H_s, W = strip.shape
+                weight = torch.ones(B, H_s, 1, device=device)
+                
+                if overlap > 0:
+                    # Fade in at top
+                    if gpu_id > 0 and overlap // 2 < strip_h:
+                        fade_size = min(overlap // 2, strip_h)
+                        fade = torch.linspace(0, 1, fade_size, device=device)
+                        fade = fade.view(1, -1, 1)
+                        weight[:, :fade_size, :] *= fade
+                    
+                    # Fade out at bottom
+                    if gpu_id < len(strips) - 1 and overlap // 2 < strip_h:
+                        fade_size = min(overlap // 2, strip_h)
+                        fade = torch.linspace(1, 0, fade_size, device=device)
+                        fade = fade.view(1, -1, 1)
+                        weight[:, -fade_size:, :] *= fade
+                
+                # Apply weighted strip
+                weighted_strip = strip * weight.expand(-1, -1, W)
+                merged[:, start_h:end_h, :] += weighted_strip
+                weights[:, start_h:end_h, :] += weight.expand(-1, -1, W)
+                
             else:
-                # Handle other tensor shapes
-                merged[..., start_h:end_h, :] += strip
-                weights[..., start_h:end_h, :] += 1.0
+                # Fallback for other tensor shapes - no blending
+                if H_dim == -2:
+                    merged[..., start_h:end_h, :] += strip
+                    if len(weight_shape) == len(strip.shape):
+                        weights[..., start_h:end_h, :] += 1.0
+                else:
+                    # Handle unexpected dimension arrangement
+                    merged[..., start_h:end_h] += strip
+                    if len(weight_shape) == len(strip.shape):
+                        weights[..., start_h:end_h] += 1.0
         
         # Normalize by weights
-        merged = merged / (weights.squeeze(-1) + 1e-8)
+        if len(shape) == 4:
+            # Expand weights to match channel dimension
+            weights_expanded = weights.expand(-1, shape[1], -1, -1)
+            merged = merged / (weights_expanded + 1e-8)
+        elif len(shape) == 3:
+            merged = merged / (weights + 1e-8)
+        else:
+            merged = merged / (weights + 1e-8)
         
         return merged
     
