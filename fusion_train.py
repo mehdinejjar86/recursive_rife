@@ -150,11 +150,19 @@ class ModelParallelWrapper(nn.Module):
         
         outputs = []
         aux_outputs_list = []
+        strip_infos = []  # Store strip information for merging
         
         for gpu_id in range(self.num_gpus):
             # Calculate strip boundaries with overlap
             start_h = max(0, gpu_id * base_strip_height - overlap // 2)
             end_h = min(H, (gpu_id + 1) * base_strip_height + overlap // 2)
+            
+            # Store strip info
+            strip_infos.append({
+                'start_h': start_h,
+                'end_h': end_h,
+                'gpu_id': gpu_id
+            })
             
             # Extract strip and move to appropriate GPU
             with torch.cuda.device(gpu_id):
@@ -175,17 +183,120 @@ class ModelParallelWrapper(nn.Module):
         # Merge outputs (blend overlapping regions)
         merged_output = self._merge_spatial_outputs(outputs, H, overlap, base_strip_height)
         
-        # Merge auxiliary outputs (simplified - just use first GPU's aux outputs)
-        aux_outputs = {}
-        for key in aux_outputs_list[0].keys():
-            if isinstance(aux_outputs_list[0][key], list):
-                # For lists, just use the first GPU's version
-                aux_outputs[key] = aux_outputs_list[0][key]
-            else:
-                # For tensors, move to GPU 0
-                aux_outputs[key] = aux_outputs_list[0][key].cuda(0) if torch.is_tensor(aux_outputs_list[0][key]) else aux_outputs_list[0][key]
+        # Merge auxiliary outputs properly
+        aux_outputs = self._merge_aux_outputs_spatial(aux_outputs_list, strip_infos, H, W, overlap, base_strip_height)
         
         return merged_output, aux_outputs
+    
+    def _merge_aux_outputs_spatial(self, aux_outputs_list, strip_infos, full_H, full_W, overlap, base_strip_height):
+        """Merge auxiliary outputs from spatial parallelism"""
+        if not aux_outputs_list:
+            return {}
+        
+        merged_aux = {}
+        
+        for key in aux_outputs_list[0].keys():
+            if key == 'warped_imgs':
+                # Special handling for warped_imgs - need to merge spatial strips
+                warped_list = []
+                for warped_idx in range(len(aux_outputs_list[0]['warped_imgs'])):
+                    # Collect this warped image from all GPUs
+                    strips = []
+                    for gpu_idx, aux in enumerate(aux_outputs_list):
+                        strip = aux['warped_imgs'][warped_idx].cuda(0)  # Move to GPU 0
+                        strips.append(strip)
+                    
+                    # Merge the strips for this warped image
+                    merged_warped = self._merge_spatial_tensors(strips, full_H, overlap, base_strip_height)
+                    warped_list.append(merged_warped)
+                
+                merged_aux['warped_imgs'] = warped_list
+                
+            elif key == 'refined_masks':
+                # Similar handling for refined_masks
+                mask_list = []
+                for mask_idx in range(len(aux_outputs_list[0]['refined_masks'])):
+                    strips = []
+                    for gpu_idx, aux in enumerate(aux_outputs_list):
+                        strip = aux['refined_masks'][mask_idx].cuda(0)
+                        strips.append(strip)
+                    
+                    merged_mask = self._merge_spatial_tensors(strips, full_H, overlap, base_strip_height)
+                    mask_list.append(merged_mask)
+                
+                merged_aux['refined_masks'] = mask_list
+                
+            elif isinstance(aux_outputs_list[0][key], list):
+                # For other lists, just use the first GPU's version
+                merged_aux[key] = aux_outputs_list[0][key]
+                
+            elif torch.is_tensor(aux_outputs_list[0][key]):
+                # For single tensors, check if they need spatial merging
+                if aux_outputs_list[0][key].dim() >= 3 and aux_outputs_list[0][key].shape[-2] < full_H:
+                    # This tensor has spatial dimensions that need merging
+                    strips = [aux[key].cuda(0) for aux in aux_outputs_list]
+                    merged_aux[key] = self._merge_spatial_tensors(strips, full_H, overlap, base_strip_height)
+                else:
+                    # This tensor doesn't have spatial dimensions or is already full size
+                    merged_aux[key] = aux_outputs_list[0][key].cuda(0)
+            else:
+                # Non-tensor values
+                merged_aux[key] = aux_outputs_list[0][key]
+        
+        return merged_aux
+    
+    def _merge_spatial_tensors(self, strips, full_height, overlap, base_strip_height):
+        """Merge spatial tensor strips with blending"""
+        if not strips:
+            return None
+        
+        device = strips[0].device
+        shape = list(strips[0].shape)
+        shape[-2] = full_height  # Update height dimension
+        
+        # Initialize merged tensor and weights
+        merged = torch.zeros(shape, device=device)
+        weights = torch.zeros(shape[:-1] + [1], device=device)  # Weight for each pixel
+        
+        for gpu_id, strip in enumerate(strips):
+            start_h = max(0, gpu_id * base_strip_height - overlap // 2)
+            end_h = min(full_height, (gpu_id + 1) * base_strip_height + overlap // 2)
+            strip_h = end_h - start_h
+            
+            # Create weight for blending (fade at edges)
+            weight_shape = list(strip.shape)
+            weight_shape[-1] = 1
+            weight = torch.ones(weight_shape, device=device)
+            
+            if overlap > 0:
+                # Fade in at top (except for first strip)
+                if gpu_id > 0 and overlap // 2 < strip_h:
+                    fade_size = min(overlap // 2, strip_h)
+                    fade = torch.linspace(0, 1, fade_size, device=device)
+                    weight[..., :fade_size, :] *= fade.view(1, 1, -1, 1)
+                
+                # Fade out at bottom (except for last strip)
+                if gpu_id < len(strips) - 1 and overlap // 2 < strip_h:
+                    fade_size = min(overlap // 2, strip_h)
+                    fade = torch.linspace(1, 0, fade_size, device=device)
+                    weight[..., -fade_size:, :] *= fade.view(1, 1, -1, 1)
+            
+            # Add weighted strip to merged tensor
+            if strip.dim() == 4:  # [B, C, H, W]
+                merged[:, :, start_h:end_h, :] += strip * weight[..., 0]
+                weights[:, :, start_h:end_h, :] += weight
+            elif strip.dim() == 3:  # [B, H, W]
+                merged[:, start_h:end_h, :] += strip * weight[:, :, :, 0]
+                weights[:, start_h:end_h, :] += weight[:, :, :, 0]
+            else:
+                # Handle other tensor shapes
+                merged[..., start_h:end_h, :] += strip
+                weights[..., start_h:end_h, :] += 1.0
+        
+        # Normalize by weights
+        merged = merged / (weights.squeeze(-1) + 1e-8)
+        
+        return merged
     
     def _forward_anchor_parallel(self, I0_all, I1_all, flows_all, masks_all, timesteps):
         """Split anchors across GPUs"""
