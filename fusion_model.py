@@ -120,20 +120,6 @@ class CrossAttentionFusion(nn.Module):
         B, C, H, W = query.shape
         N = keys.shape[1]
         
-        scale_factor = 1.0
-        length = min(H, W)
-        if length > 256:
-            scale_factor = 256.0 / length
-            original_size = (H, W)
-            H, W = int(H * scale_factor), int(W * scale_factor)
-      
-        
-        # Scale down the query if necessary
-        if scale_factor < 1.0:
-            query = F.interpolate(query, scale_factor=scale_factor, mode='bilinear', align_corners=False)
-            keys = F.interpolate(keys, scale_factor=scale_factor, mode='bilinear', align_corners=False)
-            values = F.interpolate(values, scale_factor=scale_factor, mode='bilinear', align_corners=False)
-        
         # Compute Q
         q = self.q_conv(query)  # [B, C, H, W]
         q = q.view(B, self.num_heads, self.head_dim, H*W).transpose(-2, -1)  # [B, heads, HW, head_dim]
@@ -158,11 +144,6 @@ class CrossAttentionFusion(nn.Module):
         # Combine attention from all anchors
         combined = torch.stack(all_attention, dim=1).mean(dim=1)  # [B, heads, HW, head_dim]
         combined = combined.transpose(-2, -1).contiguous().view(B, C, H, W)
-
-        if scale_factor < 1.0:
-            # Scale back to original size if necessary
-            combined = F.interpolate(combined, size=original_size, mode='bilinear', align_corners=False)
-
         
         return self.out_conv(combined)
 
@@ -228,12 +209,11 @@ class MultiAnchorFusionModel(nn.Module):
     Novel multi-anchor fusion model for video frame interpolation
     Fuses information from multiple anchor pairs with different temporal distances
     """
-    def __init__(self, num_anchors=3, base_channels=64, scale=1.0, use_deformable=False):
+    def __init__(self, num_anchors=3, base_channels=64, use_deformable=False):
         super().__init__()
         self.num_anchors = num_anchors
         self.base_channels = base_channels
         self.use_deformable = use_deformable
-        self.scale = scale
         
         # Flow warping module
         self.flow_warp = FlowWarping()

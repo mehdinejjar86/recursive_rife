@@ -137,11 +137,8 @@ class RIFEDatasetMulti(Dataset):
             self.model.load_model(self.model_dir, -1)
             self.model.eval()
             self.model.device()
-            
-            # Only print in main process
-            worker_info = torch.utils.data.get_worker_info()
-            if worker_info is None:
-                print(f"Loaded RIFE model on {self.device}")
+        
+
     
     def _precompute_all_flows(self):
         """Precompute all flows in the main process before training starts"""
