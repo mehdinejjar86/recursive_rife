@@ -1,0 +1,17 @@
+{"time":"2025-08-18T04:53:05.288699+01:00","level":"INFO","msg":"using version","core version":"0.18.7"}
+{"time":"2025-08-18T04:53:05.288746+01:00","level":"INFO","msg":"created symlink","path":"/Users/nightstalker/Projects/machine-learning/recursive_rife/wandb/run-20250818_045305-jjp8662z/logs/debug-core.log"}
+{"time":"2025-08-18T04:53:05.502238+01:00","level":"INFO","msg":"created new stream","id":"jjp8662z"}
+{"time":"2025-08-18T04:53:05.502274+01:00","level":"INFO","msg":"stream: started","id":"jjp8662z"}
+{"time":"2025-08-18T04:53:05.502333+01:00","level":"INFO","msg":"handler: started","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:05.502343+01:00","level":"INFO","msg":"writer: Do: started","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:05.502342+01:00","level":"INFO","msg":"sender: started","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:05.977253+01:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-08-18T04:53:26.048605+01:00","level":"INFO","msg":"stream: closing","id":"jjp8662z"}
+{"time":"2025-08-18T04:53:26.048672+01:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-08-18T04:53:26.0518+01:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-08-18T04:53:28.640655+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-08-18T04:53:28.88239+01:00","level":"INFO","msg":"handler: closed","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:28.882439+01:00","level":"INFO","msg":"sender: closed","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:28.882445+01:00","level":"INFO","msg":"writer: Close: closed","stream_id":"jjp8662z"}
+{"time":"2025-08-18T04:53:28.88283+01:00","level":"INFO","msg":"stream: closed","id":"jjp8662z"}
+{"time":"2025-08-18T04:53:28.883095+01:00","level":"WARN","msg":"runwork: ignoring record after close","work":{"Record":{"RecordType":{"Request":{"RequestType":{"InternalMessages":{}}}},"control":{"local":true,"mailbox_slot":"dzlh2o65o0o6","connection_id":"127.0.0.1:51058"},"_info":{"stream_id":"jjp8662z"}}}}

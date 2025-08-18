@@ -14,6 +14,14 @@ import warnings
 from skimage.metrics import peak_signal_noise_ratio as psnr_func
 from skimage.metrics import structural_similarity as ssim_func
 
+# Weights & Biases support
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with: pip install wandb")
+
 # Import your dataset and model
 from fusion_dataset import create_multi_dataloader
 from fusion_model import FusionLoss, create_fusion_model
@@ -23,13 +31,15 @@ class ModelParallelWrapper(nn.Module):
     """
     Wrapper to enable model parallelism by splitting computation across GPUs
     This allows processing larger images by pooling GPU memory
+    Updated for dynamic attention model
     """
     
-    def __init__(self, base_model, downsample_factor, num_gpus=None, split_strategy='spatial'):
+    def __init__(self, base_model, max_attention_size, num_gpus=None, split_strategy='spatial'):
         super().__init__()
         
         self.num_gpus = num_gpus or torch.cuda.device_count()
         self.split_strategy = split_strategy
+        self.max_attention_size = max_attention_size
         
         if self.num_gpus <= 1:
             # Single GPU - no parallelism needed
@@ -39,12 +49,11 @@ class ModelParallelWrapper(nn.Module):
             # Multiple GPUs - enable parallelism
             self.models = nn.ModuleList()
             for i in range(self.num_gpus):
-                # Create a model copy on each GPU
+                # Create a model copy on each GPU with dynamic attention
                 model_copy = create_fusion_model(
                     num_anchors=base_model.num_anchors,
                     base_channels=base_model.base_channels,
-                    downsample_factor=downsample_factor
-
+                    max_attention_size=max_attention_size
                 )
                 model_copy = model_copy.cuda(i)
                 self.models.append(model_copy)
@@ -61,6 +70,7 @@ class ModelParallelWrapper(nn.Module):
                         param_copy.data = param_main.data
             
             print(f"Model Parallel: Using {self.num_gpus} GPUs with {split_strategy} strategy")
+            print(f"Max attention size: {int(np.sqrt(max_attention_size))}×{int(np.sqrt(max_attention_size))}")
     
     def forward(self, I0_all, I1_all, flows_all, masks_all, timesteps):
         """Forward pass with optional model parallelism"""
@@ -334,7 +344,7 @@ class MetricsCalculator:
 
 
 class ParallelFusionTrainer:
-    """Trainer with Model Parallelism for Large Images"""
+    """Trainer with Model Parallelism for Large Images and W&B Support"""
     
     def __init__(self, config):
         self.config = config
@@ -349,6 +359,11 @@ class ParallelFusionTrainer:
         self.config.sample_dir = Path("runs") / self.run_name / Path(self.config.sample_dir)
         
         self.setup_directories()
+        
+        # Initialize W&B if available and requested
+        self.use_wandb = WANDB_AVAILABLE and getattr(config, 'use_wandb', False)
+        if self.use_wandb:
+            self._init_wandb()
         
         # Create dataloader
         self.train_loader, self.train_dataset = self._create_dataloader()
@@ -382,6 +397,34 @@ class ParallelFusionTrainer:
         # Load checkpoint if exists
         if config.resume:
             self.load_checkpoint(config.resume)
+    
+    def _init_wandb(self):
+        """Initialize Weights & Biases logging"""
+        wandb_config = vars(self.config).copy()
+        wandb_config['run_timestamp'] = self.run_timestamp
+        wandb_config['num_gpus'] = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        
+        # Get max attention size info
+        if hasattr(self.config, 'max_attention_size'):
+            size = int(np.sqrt(self.config.max_attention_size))
+            wandb_config['max_attention_dim'] = f"{size}×{size}"
+        
+        wandb.init(
+            project=getattr(self.config, 'wandb_project', 'fusion-model'),
+            entity=getattr(self.config, 'wandb_entity', None),
+            name=self.run_name,
+            config=wandb_config,
+            resume=self.config.resume is not None
+        )
+        
+        # Watch model for gradient tracking
+        if getattr(self.config, 'wandb_watch_model', False):
+            if hasattr(self.model, 'models'):
+                wandb.watch(self.model.models[0], log='all', log_freq=100)
+            else:
+                wandb.watch(self.model, log='all', log_freq=100)
+        
+        print(f"W&B initialized: {wandb.run.url}")
     
     def _setup_device(self):
         """Setup computing device"""
@@ -471,27 +514,36 @@ class ParallelFusionTrainer:
     
     def _create_parallel_model(self):
         """Create model with optional parallelism"""
+        # Get max attention size for dynamic attention
+        max_attention_size = getattr(self.config, 'max_attention_size', 96*96)
+        
         base_model = create_fusion_model(
             num_anchors=self.config.num_anchors,
             base_channels=self.config.base_channels,
-            downsample_factor=self.config.downsample_factor
+            max_attention_size=max_attention_size
         )
+        
+        # Print attention configuration
+        size = int(np.sqrt(max_attention_size))
+        print(f"\nDynamic Hierarchical Attention Configuration:")
+        print(f"  Max attention size: {size}×{size} = {max_attention_size:,} elements")
+        print(f"  Memory usage estimate: ~{max_attention_size * 4 * 4 / 1e9:.2f} GB per head")
         
         # Check if we should use model parallelism
         use_parallel = getattr(self.config, 'model_parallel', False)
         parallel_strategy = getattr(self.config, 'parallel_strategy', 'spatial')
         
         if use_parallel and torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            print(f"\nEnabling Model Parallelism with {parallel_strategy} strategy")
+            print(f"Enabling Model Parallelism with {parallel_strategy} strategy")
             model = ModelParallelWrapper(
                 base_model,
-                downsample_factor=self.config.downsample_factor,
+                max_attention_size=max_attention_size,
                 num_gpus=torch.cuda.device_count(),
                 split_strategy=parallel_strategy
             )
         else:
             model = base_model.to(self.device)
-            print(f"\nUsing standard model on {self.device}")
+            print(f"Using standard model on {self.device}")
         
         total_params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
         print(f"Model parameters: {total_params:,}")
@@ -612,6 +664,16 @@ class ParallelFusionTrainer:
                 'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
             })
             
+            # Log to W&B periodically
+            if self.use_wandb and batch_idx % 10 == 0:
+                wandb.log({
+                    'batch/loss': total_loss.item(),
+                    'batch/psnr': batch_psnr,
+                    'batch/ssim': batch_ssim,
+                    'batch/lr': self.optimizer.param_groups[0]['lr'],
+                    'step': epoch * len(self.train_loader) + batch_idx
+                })
+            
             # Report GPU memory usage periodically
             if batch_idx % 10 == 0 and torch.cuda.is_available():
                 for i in range(torch.cuda.device_count()):
@@ -621,6 +683,12 @@ class ParallelFusionTrainer:
                         pbar.set_description(
                             f"Epoch {epoch}/{self.config.epochs} | GPU{i}: {mem_mb:.0f}/{max_mem_mb:.0f}MB"
                         )
+                        if self.use_wandb:
+                            wandb.log({
+                                f'gpu_{i}/memory_mb': mem_mb,
+                                f'gpu_{i}/max_memory_mb': max_mem_mb,
+                                'step': epoch * len(self.train_loader) + batch_idx
+                            })
         
         # Average metrics
         for key in epoch_losses:
@@ -649,18 +717,27 @@ class ParallelFusionTrainer:
             'best_psnr': self.best_psnr,
             'best_ssim': self.best_ssim,
             'epoch_metrics': self.epoch_metrics,
-            'config': vars(self.config)
+            'config': vars(self.config),
+            'wandb_run_id': wandb.run.id if self.use_wandb else None
         }
         
         if epoch % self.config.save_interval == 0:
             checkpoint_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch:04d}.pth'
             torch.save(checkpoint, checkpoint_path)
             print(f"  Checkpoint saved: {checkpoint_path}")
+            
+            if self.use_wandb:
+                wandb.save(str(checkpoint_path))
         
         if is_best:
             best_path = self.checkpoint_dir / 'best_model.pth'
             torch.save(checkpoint, best_path)
             print(f"  Best model saved!")
+            
+            if self.use_wandb:
+                wandb.save(str(best_path))
+                wandb.run.summary["best_psnr"] = self.best_psnr
+                wandb.run.summary["best_ssim"] = self.best_ssim
         
         latest_path = self.checkpoint_dir / 'latest_model.pth'
         torch.save(checkpoint, latest_path)
@@ -711,12 +788,20 @@ class ParallelFusionTrainer:
             if self.scheduler:
                 self.scheduler.step()
             
-            # Log metrics
+            # Log metrics to TensorBoard
             for name, value in train_losses.items():
                 self.writer.add_scalar(f'train/{name}', value, epoch)
             
             self.writer.add_scalar('learning_rate', 
                                   self.optimizer.param_groups[0]['lr'], epoch)
+            
+            # Log metrics to W&B
+            if self.use_wandb:
+                wandb_metrics = {f'epoch/{k}': v for k, v in train_losses.items()}
+                wandb_metrics['epoch'] = epoch
+                wandb_metrics['learning_rate'] = self.optimizer.param_groups[0]['lr']
+                wandb_metrics['is_best'] = is_best
+                wandb.log(wandb_metrics)
             
             # Print summary
             epoch_time = (datetime.now() - epoch_start_time).total_seconds()
@@ -741,13 +826,17 @@ class ParallelFusionTrainer:
                 json.dump(self.epoch_metrics, f, indent=2, default=str)
         
         self.writer.close()
+        
+        if self.use_wandb:
+            wandb.finish()
+        
         print("\nTraining completed!")
         print(f"Best PSNR: {self.best_psnr:.2f} dB")
         print(f"Best SSIM: {self.best_ssim:.4f}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Fusion Model with Model Parallelism')
+    parser = argparse.ArgumentParser(description='Train Fusion Model with Dynamic Attention and W&B Support')
     
     # Dataset arguments
     parser.add_argument('--gt_paths', '--gt_path', type=str, nargs='+', required=True,
@@ -772,8 +861,8 @@ def main():
                         help='Number of anchor frames')
     parser.add_argument('--base_channels', type=int, default=64,
                         help='Base number of channels in model')
-    parser.add_argument('--downsample_factor', type=int, default=1,
-                        help='Downsample factor for input images')
+    parser.add_argument('--max_attention_size', type=int, default=96*96,
+                        help='Maximum size for attention matrices (e.g., 64*64, 96*96, 128*128)')
     parser.add_argument('--scale', type=float, default=1.0,
                         help='Scale factor for processing')
     parser.add_argument('--UHD', action='store_true',
@@ -835,6 +924,16 @@ def main():
                         help='Optional name for this training run')
     parser.add_argument('--save_interval', type=int, default=10,
                         help='Checkpoint saving interval')
+    
+    # W&B arguments
+    parser.add_argument('--use_wandb', action='store_true',
+                        help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', type=str, default='fusion-model',
+                        help='W&B project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='W&B entity (username or team)')
+    parser.add_argument('--wandb_watch_model', action='store_true',
+                        help='Watch model gradients in W&B')
     
     # Metrics
     parser.add_argument('--metric_size', type=int, nargs=2, default=[256, 256],

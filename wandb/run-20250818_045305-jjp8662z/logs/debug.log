@@ -1,0 +1,26 @@
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Current SDK version is 0.18.7
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Configure stats pid to 34128
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Loading settings from /Users/nightstalker/.config/wandb/settings
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Loading settings from /Users/nightstalker/Projects/machine-learning/recursive_rife/wandb/settings
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Loading settings from environment variables: {}
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Applying setup settings: {'mode': None, '_disable_service': None}
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Inferring run settings from compute environment: {'program_relpath': 'fusion_train.py', 'program_abspath': '/Users/nightstalker/Projects/machine-learning/recursive_rife/fusion_train.py', 'program': '/Users/nightstalker/Projects/machine-learning/recursive_rife/fusion_train.py'}
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_setup.py:_flush():79] Applying login settings: {}
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_init.py:_log_setup():533] Logging user logs to /Users/nightstalker/Projects/machine-learning/recursive_rife/wandb/run-20250818_045305-jjp8662z/logs/debug.log
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_init.py:_log_setup():534] Logging internal logs to /Users/nightstalker/Projects/machine-learning/recursive_rife/wandb/run-20250818_045305-jjp8662z/logs/debug-internal.log
+2025-08-18 04:53:05,284 INFO    MainThread:34128 [wandb_init.py:init():619] calling init triggers
+2025-08-18 04:53:05,285 INFO    MainThread:34128 [wandb_init.py:init():626] wandb.init called with sweep_config: {}
+config: {'gt_paths': ['E30_c1'], 'steps': [6], 'val_split': 0.1, 'val_paths': ['E30_c3'], 'val_steps': [6], 'num_anchors': 3, 'base_channels': 64, 'max_attention_size': 9216, 'scale': 1.0, 'UHD': False, 'rife_model_dir': 'ckpt/rifev4_25', 'model_parallel': False, 'parallel_strategy': 'spatial', 'batch_size': 1, 'epochs': 100, 'learning_rate': 0.0001, 'min_lr': 1e-06, 'weight_decay': 1e-05, 'grad_clip': 1.0, 'lambda_l1': 1.0, 'lambda_perceptual': 0.1, 'lambda_smooth': 0.01, 'lambda_consistency': 0.1, 'optimizer': 'adamw', 'scheduler': 'cosine', 'step_size': 30, 'gamma': 0.1, 'checkpoint_dir': PosixPath('runs/2025-08-18-04-53-04/checkpoints'), 'log_dir': PosixPath('runs/2025-08-18-04-53-04/logs'), 'sample_dir': PosixPath('runs/2025-08-18-04-53-04/samples'), 'run_name': '2025-08-18-04-53-04', 'save_interval': 10, 'use_wandb': True, 'wandb_project': 'fusion-model', 'wandb_entity': None, 'wandb_watch_model': False, 'metric_size': [256, 256], 'num_workers': 4, 'resume': None, 'seed': 42, 'mix_strategy': 'balanced', 'cache_flows': False, 'run_timestamp': '2025-08-18-04-53-04', 'num_gpus': 0, 'max_attention_dim': '96×96'}
+2025-08-18 04:53:05,285 INFO    MainThread:34128 [wandb_init.py:init():669] starting backend
+2025-08-18 04:53:05,285 INFO    MainThread:34128 [wandb_init.py:init():673] sending inform_init request
+2025-08-18 04:53:05,286 INFO    MainThread:34128 [backend.py:_multiprocessing_setup():104] multiprocessing start_methods=spawn,fork,forkserver, using: spawn
+2025-08-18 04:53:05,286 INFO    MainThread:34128 [wandb_init.py:init():686] backend started and connected
+2025-08-18 04:53:05,290 INFO    MainThread:34128 [wandb_init.py:init():781] updated telemetry
+2025-08-18 04:53:05,314 INFO    MainThread:34128 [wandb_init.py:init():814] communicating run to backend with 90.0 second timeout
+2025-08-18 04:53:05,975 INFO    MainThread:34128 [wandb_init.py:init():867] starting run threads in backend
+2025-08-18 04:53:06,036 INFO    MainThread:34128 [wandb_run.py:_console_start():2456] atexit reg
+2025-08-18 04:53:06,036 INFO    MainThread:34128 [wandb_run.py:_redirect():2305] redirect: wrap_raw
+2025-08-18 04:53:06,036 INFO    MainThread:34128 [wandb_run.py:_redirect():2370] Wrapping output streams.
+2025-08-18 04:53:06,036 INFO    MainThread:34128 [wandb_run.py:_redirect():2395] Redirects installed.
+2025-08-18 04:53:06,038 INFO    MainThread:34128 [wandb_init.py:init():911] run started, returning control to user process
+2025-08-18 04:53:26,052 WARNING MsgRouterThr:34128 [router.py:message_loop():75] message_loop has been closed

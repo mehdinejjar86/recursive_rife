@@ -1,0 +1,58 @@
+{
+  "os":  "macOS-15.6-arm64-arm-64bit",
+  "python":  "3.10.15",
+  "startedAt":  "2025-08-18T03:53:05.287011Z",
+  "args":  [
+    "--gt_paths",
+    "E30_c1",
+    "--steps",
+    "6",
+    "--val_path",
+    "E30_c3",
+    "--val_steps",
+    "6",
+    "--mix_strategy",
+    "balanced",
+    "--epochs",
+    "100",
+    "--batch_size",
+    "1",
+    "--base_channels",
+    "64",
+    "--use_wandb"
+  ],
+  "program":  "/Users/nightstalker/Projects/machine-learning/recursive_rife/fusion_train.py",
+  "codePath":  "fusion_train.py",
+  "git":  {
+    "remote":  "https://github.com/mehdinejjar86/recursive_rife.git",
+    "commit":  "f620627d3bcf3d764f658c974ab59d9de3664348"
+  },
+  "email":  "mehdinejjar@hotmail.com",
+  "root":  "/Users/nightstalker/Projects/machine-learning/recursive_rife",
+  "host":  "192.168.11.116",
+  "username":  "nightstalker",
+  "executable":  "/Users/nightstalker/miniconda3/envs/pytorch/bin/python",
+  "codePathLocal":  "fusion_train.py",
+  "cpu_count":  16,
+  "cpu_count_logical":  16,
+  "disk":  {
+    "/":  {
+      "total":  "994662584320",
+      "used":  "500260401152"
+    }
+  },
+  "memory":  {
+    "total":  "51539607552"
+  },
+  "cpu":  {
+    "count":  16,
+    "countLogical":  16
+  },
+  "apple":  {
+    "name":  "Apple M4 Max",
+    "ecpuCores":  4,
+    "pcpuCores":  12,
+    "gpuCores":  40,
+    "memoryGb":  48
+  }
+}

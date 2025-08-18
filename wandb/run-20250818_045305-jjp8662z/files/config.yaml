@@ -1,0 +1,121 @@
+_wandb:
+    value:
+        cli_version: 0.18.7
+        m: []
+        python_version: 3.10.15
+        t:
+            "1":
+                - 1
+                - 55
+            "2":
+                - 1
+                - 41
+                - 55
+            "3":
+                - 13
+                - 16
+                - 23
+                - 55
+            "4": 3.10.15
+            "5": 0.18.7
+            "8":
+                - 2
+                - 5
+            "12": 0.18.7
+            "13": darwin-arm64
+UHD:
+    value: false
+base_channels:
+    value: 64
+batch_size:
+    value: 1
+cache_flows:
+    value: false
+checkpoint_dir:
+    value: runs/2025-08-18-04-53-04/checkpoints
+epochs:
+    value: 100
+gamma:
+    value: 0.1
+grad_clip:
+    value: 1
+gt_paths:
+    value:
+        - E30_c1
+lambda_consistency:
+    value: 0.1
+lambda_l1:
+    value: 1
+lambda_perceptual:
+    value: 0.1
+lambda_smooth:
+    value: 0.01
+learning_rate:
+    value: 0.0001
+log_dir:
+    value: runs/2025-08-18-04-53-04/logs
+max_attention_dim:
+    value: 96×96
+max_attention_size:
+    value: 9216
+metric_size:
+    value:
+        - 256
+        - 256
+min_lr:
+    value: 1e-06
+mix_strategy:
+    value: balanced
+model_parallel:
+    value: false
+num_anchors:
+    value: 3
+num_gpus:
+    value: 0
+num_workers:
+    value: 4
+optimizer:
+    value: adamw
+parallel_strategy:
+    value: spatial
+resume:
+    value: null
+rife_model_dir:
+    value: ckpt/rifev4_25
+run_name:
+    value: 2025-08-18-04-53-04
+run_timestamp:
+    value: 2025-08-18-04-53-04
+sample_dir:
+    value: runs/2025-08-18-04-53-04/samples
+save_interval:
+    value: 10
+scale:
+    value: 1
+scheduler:
+    value: cosine
+seed:
+    value: 42
+step_size:
+    value: 30
+steps:
+    value:
+        - 6
+use_wandb:
+    value: true
+val_paths:
+    value:
+        - E30_c3
+val_split:
+    value: 0.1
+val_steps:
+    value:
+        - 6
+wandb_entity:
+    value: null
+wandb_project:
+    value: fusion-model
+wandb_watch_model:
+    value: false
+weight_decay:
+    value: 1e-05
