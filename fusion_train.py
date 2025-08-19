@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import torchvision  # Added for image saving
 import numpy as np
 from tqdm import tqdm
 import argparse
@@ -937,6 +938,171 @@ class ParallelFusionTrainer:
         else:
             return None
     
+    def save_sample_images(self, epoch, batch_idx=0, num_samples=4):
+        """Save sample images during training for visual inspection - handles model parallelism"""
+        self.model.eval()
+        
+        with torch.no_grad():
+            # Get a sample batch
+            sample_batch = next(iter(self.val_loader if self.val_loader else self.train_loader))
+            
+            # Limit number of samples
+            num_samples = min(num_samples, sample_batch['I0'].shape[0])
+            
+            # Move to device and process
+            I0_all = sample_batch['I0'][:num_samples].to(self.device)
+            I1_all = sample_batch['I1'][:num_samples].to(self.device)
+            flows_all = sample_batch['flows'][:num_samples].to(self.device)
+            masks_all = sample_batch['masks'][:num_samples].to(self.device)
+            timesteps = sample_batch['timesteps'][:num_samples].to(self.device)
+            I_gt = sample_batch['I_gt'][:num_samples].to(self.device)
+            
+            # Generate predictions - handles parallelism internally
+            output, aux_outputs = self.model(I0_all, I1_all, flows_all, masks_all, timesteps)
+            
+            # Ensure output is on correct device
+            if output.device != self.device:
+                output = output.to(self.device)
+            
+            # Move to CPU for saving
+            output = output.cpu()
+            I_gt = I_gt.cpu()
+            I0 = I0_all[:, 0].cpu()  # First anchor
+            I1 = I1_all[:, 0].cpu()  # First anchor
+            
+            # Create comparison grid for each sample
+            for idx in range(num_samples):
+                # Create a grid: [I0, I1, GT, Prediction, |GT-Pred|]
+                images = []
+                
+                # Input frame 0
+                img_i0 = I0[idx].clamp(0, 1)
+                images.append(img_i0)
+                
+                # Input frame 1
+                img_i1 = I1[idx].clamp(0, 1)
+                images.append(img_i1)
+                
+                # Ground truth
+                img_gt = I_gt[idx].clamp(0, 1)
+                images.append(img_gt)
+                
+                # Prediction
+                img_pred = output[idx].clamp(0, 1)
+                images.append(img_pred)
+                
+                # Error map (amplified for visibility)
+                error = torch.abs(img_gt - img_pred) * 5  # Amplify error by 5x
+                error = error.clamp(0, 1)
+                images.append(error)
+                
+                # Create grid
+                grid = torch.cat(images, dim=2)  # Concatenate horizontally
+                
+                # Save individual sample
+                save_path = self.sample_dir / f'epoch_{epoch:04d}_sample_{idx:02d}.png'
+                torchvision.utils.save_image(grid, save_path)
+            
+            # Also save a batch grid
+            batch_grid = torchvision.utils.make_grid(
+                torch.cat([I0, I1, I_gt, output], dim=0),
+                nrow=num_samples,
+                normalize=True,
+                scale_each=True
+            )
+            batch_path = self.sample_dir / f'epoch_{epoch:04d}_batch.png'
+            torchvision.utils.save_image(batch_grid, batch_path)
+            
+            # Log to W&B if enabled
+            if self.use_wandb and getattr(self.config, 'save_samples_to_wandb', True):
+                # Log grid image
+                wandb.log({
+                    'samples/batch_grid': wandb.Image(batch_grid.permute(1, 2, 0).numpy()),
+                    'epoch': epoch
+                })
+                
+                # Log individual comparisons
+                for idx in range(min(2, num_samples)):  # Log first 2 samples
+                    wandb.log({
+                        f'samples/sample_{idx}': wandb.Image(
+                            torch.cat([
+                                I0[idx].clamp(0, 1),
+                                I1[idx].clamp(0, 1),
+                                I_gt[idx].clamp(0, 1),
+                                output[idx].clamp(0, 1)
+                            ], dim=2).permute(1, 2, 0).numpy()
+                        ),
+                        'epoch': epoch
+                    })
+            
+            # Log to TensorBoard
+            self.writer.add_image('samples/inputs_0', 
+                                 torchvision.utils.make_grid(I0, nrow=2, normalize=True), 
+                                 epoch)
+            self.writer.add_image('samples/inputs_1',
+                                 torchvision.utils.make_grid(I1, nrow=2, normalize=True),
+                                 epoch)
+            self.writer.add_image('samples/ground_truth',
+                                 torchvision.utils.make_grid(I_gt, nrow=2, normalize=True),
+                                 epoch)
+            self.writer.add_image('samples/predictions',
+                                 torchvision.utils.make_grid(output, nrow=2, normalize=True),
+                                 epoch)
+            
+            # Calculate and log metrics for these samples
+            output_resized = self.metrics_calc.resize_for_metrics(output)
+            gt_resized = self.metrics_calc.resize_for_metrics(I_gt)
+            
+            sample_psnr = self.metrics_calc.calculate_psnr(output_resized, gt_resized)
+            sample_ssim = self.metrics_calc.calculate_ssim(output_resized, gt_resized)
+            
+            print(f"  Sample metrics - PSNR: {sample_psnr:.2f} dB, SSIM: {sample_ssim:.4f}")
+            print(f"  Samples saved to: {self.sample_dir}")
+        
+        self.model.train()
+        return sample_psnr, sample_ssim
+    
+    def save_flow_visualization(self, epoch, num_samples=2):
+        """Save optical flow visualizations"""
+        try:
+            import cv2
+        except ImportError:
+            print("Warning: OpenCV not installed, skipping flow visualization")
+            return
+        
+        self.model.eval()
+        
+        with torch.no_grad():
+            sample_batch = next(iter(self.val_loader if self.val_loader else self.train_loader))
+            
+            flows = sample_batch['flows'][:num_samples].to(self.device)
+            masks = sample_batch['masks'][:num_samples].to(self.device)
+            
+            for idx in range(num_samples):
+                # Get first anchor's flow
+                flow = flows[idx, 0].cpu().numpy().transpose(1, 2, 0)
+                mask = masks[idx, 0].cpu().numpy()
+                
+                # Convert flow to HSV for visualization
+                mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                hsv = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+                hsv[..., 0] = ang * 180 / np.pi / 2  # Hue represents direction
+                hsv[..., 1] = 255  # Full saturation
+                hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)  # Value represents magnitude
+                
+                # Convert to RGB
+                flow_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                
+                # Save flow visualization
+                flow_path = self.sample_dir / f'epoch_{epoch:04d}_flow_{idx:02d}.png'
+                cv2.imwrite(str(flow_path), cv2.cvtColor(flow_rgb, cv2.COLOR_RGB2BGR))
+                
+                # Save mask
+                mask_path = self.sample_dir / f'epoch_{epoch:04d}_mask_{idx:02d}.png'
+                cv2.imwrite(str(mask_path), (mask * 255).astype(np.uint8))
+        
+        self.model.train()
+    
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.model.train()
@@ -1217,7 +1383,7 @@ class ParallelFusionTrainer:
         print(f"Best train PSNR: {self.best_psnr:.2f} dB, Best val PSNR: {self.best_val_psnr:.2f} dB")
     
     def train(self):
-        """Main training loop"""
+        """Main training loop with image sampling"""
         print(f"\nStarting training for {self.config.epochs} epochs")
         print("-" * 60)
         
@@ -1232,12 +1398,30 @@ class ParallelFusionTrainer:
             if self.val_loader is not None:
                 val_losses = self.validate_epoch(epoch)
             
+            # Save sample images periodically
+            sample_interval = getattr(self.config, 'sample_interval', 5)
+            if epoch % sample_interval == 0 or epoch == 0:
+                print(f"\nGenerating visual samples...")
+                sample_psnr, sample_ssim = self.save_sample_images(
+                    epoch,
+                    num_samples=getattr(self.config, 'num_samples', 4)
+                )
+                
+                # Optionally save flow visualizations
+                if getattr(self.config, 'save_flow_viz', False):
+                    self.save_flow_visualization(epoch, num_samples=2)
+            
             # Check if best model
             is_best = train_losses['psnr'] > self.best_psnr
             if is_best:
                 self.best_psnr = train_losses['psnr']
                 self.best_ssim = train_losses['ssim']
                 print(f"  New best training model! PSNR: {self.best_psnr:.2f} dB")
+                
+                # Save extra samples for best model
+                if getattr(self.config, 'sample_on_best', False):
+                    print(f"  Saving extra samples for best model...")
+                    self.save_sample_images(epoch, num_samples=8)
             
             is_best_val = False
             if val_losses is not None:
@@ -1398,6 +1582,18 @@ def main():
                         help='Optional name for this training run')
     parser.add_argument('--save_interval', type=int, default=10,
                         help='Checkpoint saving interval')
+    
+    # Image sampling arguments
+    parser.add_argument('--sample_interval', type=int, default=5,
+                        help='Epoch interval for saving sample images (default: 5)')
+    parser.add_argument('--num_samples', type=int, default=4,
+                        help='Number of sample images to save per checkpoint (default: 4)')
+    parser.add_argument('--save_flow_viz', action='store_true',
+                        help='Save optical flow visualizations')
+    parser.add_argument('--sample_on_best', action='store_true',
+                        help='Save extra samples when best model is found')
+    parser.add_argument('--save_samples_to_wandb', action='store_true',
+                        help='Log sample images to W&B (if enabled)')
     
     # W&B arguments
     parser.add_argument('--use_wandb', action='store_true',
