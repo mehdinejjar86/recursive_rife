@@ -22,3 +22,4 @@ train/*
 runs/*
 wandb/*
 *.ipynb_checkpoints
+*analysis*
