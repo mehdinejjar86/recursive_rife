@@ -3,6 +3,7 @@
 *.py#
 *demo*
 *.pkl
+*.pth
 *output*
 train_log/*
 *.mp4

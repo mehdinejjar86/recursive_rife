@@ -750,6 +750,7 @@ if __name__ == "__main__":
         (512, 512, "Small"),
         (1024, 1024, "Medium"),
         (2048, 2048, "Large"),
+        (4096, 4096, "Extra Large")  # Very high resolution for stress testing
     ]
     
     for height, width, size_name in test_configs:
